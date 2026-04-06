@@ -9,6 +9,7 @@ use api::{
     OutputContentBlock, PromptCache, PromptCacheConfig, ProviderClient, StreamEvent, ToolChoice,
     ToolDefinition,
 };
+use runtime::RuntimeProviderConfig;
 use serde_json::json;
 use telemetry::{ClientIdentity, MemoryTelemetrySink, SessionTracer, TelemetryEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,7 +83,7 @@ async fn send_message_posts_json_and_parses_response() {
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
-        Some("claude-code/0.1.0")
+        Some("claw-code/0.1.0")
     );
     assert_eq!(
         request.headers.get("anthropic-beta").map(String::as_str),
@@ -435,8 +436,10 @@ async fn provider_client_dispatches_anthropic_requests() {
     )
     .await;
 
-    let client = ProviderClient::from_model_with_anthropic_auth(
+    let provider = RuntimeProviderConfig::default().with_id(Some("anthropic".to_string()));
+    let client = ProviderClient::from_model_with_provider_config_and_auth(
         "claude-sonnet-4-6",
+        Some(&provider),
         Some(AuthSource::ApiKey("test-key".to_string())),
     )
     .expect("anthropic provider client should be constructed");

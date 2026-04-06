@@ -47,9 +47,12 @@ impl ProviderClient {
         let base_url = providers::base_url_for_provider(metadata, provider_config)?;
         match metadata.transport {
             ProviderTransport::Anthropic => {
-                let auth = anthropic_auth.unwrap_or(anthropic::auth_source_from_config(
-                    providers::anthropic_config_for_metadata(metadata),
-                )?);
+                let auth = match anthropic_auth {
+                    Some(auth) => auth,
+                    None => anthropic::auth_source_from_config(
+                        providers::anthropic_config_for_metadata(metadata),
+                    )?,
+                };
                 let client = AnthropicClient::from_auth(auth)
                     .with_base_url(base_url)
                     .with_request_profile(providers::anthropic_request_profile_for_metadata(
