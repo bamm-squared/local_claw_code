@@ -4,6 +4,7 @@ use std::pin::Pin;
 
 use runtime::{active_provider_override, RuntimeProviderConfig};
 use serde::Serialize;
+use telemetry::{AnthropicRequestProfile, ClientIdentity};
 
 use crate::error::ApiError;
 use crate::types::{MessageRequest, MessageResponse};
@@ -67,6 +68,10 @@ pub struct ProviderMetadata {
     pub display_name: &'static str,
     pub provider: ProviderKind,
     pub transport: ProviderTransport,
+<<<<<<< ours
+=======
+    pub default_model: Option<&'static str>,
+>>>>>>> theirs
     pub auth_env: &'static str,
     pub auth_env_secondary: Option<&'static str>,
     pub base_url_env: &'static str,
@@ -97,6 +102,10 @@ const fn anthropic_metadata() -> ProviderMetadata {
         display_name: "Anthropic",
         provider: ProviderKind::Anthropic,
         transport: ProviderTransport::Anthropic,
+<<<<<<< ours
+=======
+        default_model: Some("claude-sonnet-4-6"),
+>>>>>>> theirs
         auth_env: "ANTHROPIC_AUTH_TOKEN",
         auth_env_secondary: Some("ANTHROPIC_API_KEY"),
         base_url_env: "ANTHROPIC_BASE_URL",
@@ -112,6 +121,10 @@ const fn openai_metadata() -> ProviderMetadata {
         display_name: "OpenAI",
         provider: ProviderKind::OpenAi,
         transport: ProviderTransport::OpenAiCompat,
+<<<<<<< ours
+=======
+        default_model: Some("gpt-5"),
+>>>>>>> theirs
         auth_env: "OPENAI_API_KEY",
         auth_env_secondary: None,
         base_url_env: "OPENAI_BASE_URL",
@@ -127,6 +140,10 @@ const fn xai_metadata() -> ProviderMetadata {
         display_name: "xAI",
         provider: ProviderKind::Xai,
         transport: ProviderTransport::OpenAiCompat,
+<<<<<<< ours
+=======
+        default_model: Some("grok-3"),
+>>>>>>> theirs
         auth_env: "XAI_API_KEY",
         auth_env_secondary: None,
         base_url_env: "XAI_BASE_URL",
@@ -142,6 +159,10 @@ const fn gemini_metadata() -> ProviderMetadata {
         display_name: "Gemini",
         provider: ProviderKind::Gemini,
         transport: ProviderTransport::OpenAiCompat,
+<<<<<<< ours
+=======
+        default_model: Some("gemini-2.5-pro"),
+>>>>>>> theirs
         auth_env: "GEMINI_API_KEY",
         auth_env_secondary: None,
         base_url_env: "GEMINI_BASE_URL",
@@ -157,6 +178,10 @@ const fn openai_compatible_metadata() -> ProviderMetadata {
         display_name: "OpenAI-compatible",
         provider: ProviderKind::OpenAiCompatible,
         transport: ProviderTransport::OpenAiCompat,
+<<<<<<< ours
+=======
+        default_model: None,
+>>>>>>> theirs
         auth_env: "OPENAI_COMPAT_API_KEY",
         auth_env_secondary: None,
         base_url_env: "OPENAI_COMPAT_BASE_URL",
@@ -172,6 +197,10 @@ const fn anthropic_compatible_metadata() -> ProviderMetadata {
         display_name: "Anthropic-compatible",
         provider: ProviderKind::AnthropicCompatible,
         transport: ProviderTransport::Anthropic,
+<<<<<<< ours
+=======
+        default_model: None,
+>>>>>>> theirs
         auth_env: "ANTHROPIC_COMPAT_AUTH_TOKEN",
         auth_env_secondary: Some("ANTHROPIC_COMPAT_API_KEY"),
         base_url_env: "ANTHROPIC_COMPAT_BASE_URL",
@@ -187,6 +216,10 @@ const fn ollama_metadata() -> ProviderMetadata {
         display_name: "Ollama",
         provider: ProviderKind::Ollama,
         transport: ProviderTransport::Anthropic,
+<<<<<<< ours
+=======
+        default_model: None,
+>>>>>>> theirs
         auth_env: "OLLAMA_AUTH_TOKEN",
         auth_env_secondary: Some("OLLAMA_API_KEY"),
         base_url_env: "OLLAMA_BASE_URL",
@@ -207,10 +240,53 @@ fn effective_provider_config(
 #[must_use]
 pub fn resolve_model_alias(model: &str) -> String {
     let trimmed = model.trim();
+<<<<<<< ours
     match trimmed.to_ascii_lowercase().as_str() {
         "opus" => "claude-opus-4-6".to_string(),
         "sonnet" => "claude-sonnet-4-6".to_string(),
         "haiku" => "claude-haiku-4-5-20251213".to_string(),
+=======
+    let lowercase = trimmed.to_ascii_lowercase();
+    resolve_model_alias_with_context(trimmed, lowercase.as_str(), true)
+}
+
+#[must_use]
+pub fn resolve_model_alias_for_provider(
+    model: &str,
+    provider_config: Option<&RuntimeProviderConfig>,
+) -> String {
+    let trimmed = model.trim();
+    let lowercase = trimmed.to_ascii_lowercase();
+    let effective = effective_provider_config(provider_config);
+    let anthropic_context = effective
+        .id()
+        .and_then(provider_metadata_by_id)
+        .map(|metadata| {
+            matches!(
+                metadata.provider,
+                ProviderKind::Anthropic | ProviderKind::AnthropicCompatible
+            )
+        })
+        .unwrap_or(true);
+    resolve_model_alias_with_context(trimmed, lowercase.as_str(), anthropic_context)
+}
+
+fn resolve_model_alias_with_context(
+    trimmed: &str,
+    lowercase: &str,
+    anthropic_context: bool,
+) -> String {
+    if anthropic_context {
+        match lowercase {
+            "opus" => return "claude-opus-4-6".to_string(),
+            "sonnet" => return "claude-sonnet-4-6".to_string(),
+            "haiku" => return "claude-haiku-4-5-20251213".to_string(),
+            _ => {}
+        }
+    }
+
+    match lowercase {
+>>>>>>> theirs
         "grok" | "grok-3" => "grok-3".to_string(),
         "grok-mini" | "grok-3-mini" => "grok-3-mini".to_string(),
         "grok-2" => "grok-2".to_string(),
@@ -289,6 +365,29 @@ pub fn resolve_provider_metadata(
     }
 }
 
+<<<<<<< ours
+=======
+pub fn resolve_default_model(
+    provider_config: Option<&RuntimeProviderConfig>,
+) -> Result<Option<String>, ApiError> {
+    let effective = effective_provider_config(provider_config);
+    if let Some(provider_id) = effective.id() {
+        return provider_metadata_by_id(provider_id)
+            .ok_or(ApiError::UnsupportedProvider {
+                provider: provider_id.to_string(),
+                supported: SUPPORTED_PROVIDER_IDS,
+            })
+            .map(|metadata| metadata.default_model.map(str::to_string));
+    }
+
+    let configured = configured_provider_metadata()?;
+    Ok(match configured.as_slice() {
+        [metadata] => metadata.default_model.map(str::to_string),
+        _ => None,
+    })
+}
+
+>>>>>>> theirs
 pub fn base_url_for_provider(
     metadata: ProviderMetadata,
     provider_config: Option<&RuntimeProviderConfig>,
@@ -308,6 +407,21 @@ pub fn base_url_for_provider(
 }
 
 #[must_use]
+<<<<<<< ours
+=======
+pub fn anthropic_request_profile_for_metadata(
+    metadata: ProviderMetadata,
+) -> AnthropicRequestProfile {
+    let profile = AnthropicRequestProfile::new(ClientIdentity::default().with_runtime("rust-cli"));
+    match metadata.provider {
+        ProviderKind::Anthropic => profile,
+        ProviderKind::AnthropicCompatible | ProviderKind::Ollama => profile.without_betas(),
+        other => panic!("unsupported anthropic transport provider metadata: {other:?}"),
+    }
+}
+
+#[must_use]
+>>>>>>> theirs
 pub fn anthropic_config_for_metadata(metadata: ProviderMetadata) -> anthropic::AnthropicEnvConfig {
     anthropic::AnthropicEnvConfig {
         provider_name: metadata.display_name,

@@ -44,7 +44,11 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, format_usd, generate_pkce_pair, generate_state,
     load_oauth_credentials, load_system_prompt, parse_oauth_callback_request_target,
+<<<<<<< ours
     pricing_for_model, resolve_sandbox_status, save_oauth_credentials,
+=======
+    pricing_for_model, resolve_sandbox_status, save_oauth_credentials, set_active_model_override,
+>>>>>>> theirs
     set_active_provider_override, ApiClient, ApiRequest, AssistantEvent, CompactionConfig,
     ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, ConversationRuntime,
     McpServerManager, McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
@@ -56,7 +60,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tools::{GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput};
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+const UNCONFIGURED_MODEL: &str = "<configure --model>";
 fn max_tokens_for_model(model: &str) -> u32 {
     api::max_tokens_for_model(model)
 }
@@ -272,10 +277,15 @@ impl CliOutputFormat {
 
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
+<<<<<<< ours
     let mut model = configured_model_for_current_dir()
         .map(|value| resolve_model_alias(&value).to_string())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut provider = configured_provider_for_current_dir();
+=======
+    let mut provider = configured_provider_for_current_dir();
+    let mut model = configured_model_for_current_dir();
+>>>>>>> theirs
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode_override = None;
     let mut wants_help = false;
@@ -298,11 +308,33 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing value for --model".to_string())?;
-                model = resolve_model_alias(value).to_string();
+                model = Some(value.clone());
                 index += 2;
             }
             flag if flag.starts_with("--model=") => {
-                model = resolve_model_alias(&flag[8..]).to_string();
+                model = Some(flag[8..].to_string());
+                index += 1;
+            }
+            "--provider" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --provider".to_string())?;
+                provider = provider.with_id(Some(value.clone()));
+                index += 2;
+            }
+            flag if flag.starts_with("--provider=") => {
+                provider = provider.with_id(Some(flag[11..].to_string()));
+                index += 1;
+            }
+            "--provider-base-url" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --provider-base-url".to_string())?;
+                provider = provider.with_base_url(Some(value.clone()));
+                index += 2;
+            }
+            flag if flag.starts_with("--provider-base-url=") => {
+                provider = provider.with_base_url(Some(flag[20..].to_string()));
                 index += 1;
             }
             "--provider" => {
@@ -361,7 +393,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 }
                 return Ok(CliAction::Prompt {
                     prompt,
+<<<<<<< ours
                     model: resolve_model_alias(&model).to_string(),
+=======
+                    model: effective_model_for_execution(model.as_deref(), &provider)?,
+>>>>>>> theirs
                     provider,
                     output_format,
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
@@ -421,7 +457,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     if rest.is_empty() {
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         return Ok(CliAction::Repl {
+<<<<<<< ours
             model,
+=======
+            model: effective_model_for_execution(model.as_deref(), &provider)?,
+>>>>>>> theirs
             provider,
             allowed_tools,
             permission_mode,
@@ -435,7 +475,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     }
     if let Some(action) = parse_single_word_command_alias(
         &rest,
+<<<<<<< ours
         &model,
+=======
+        model.as_deref(),
+>>>>>>> theirs
         &provider,
         permission_mode_override,
         output_format,
@@ -471,7 +515,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             Ok(CliAction::Prompt {
                 prompt,
+<<<<<<< ours
                 model,
+=======
+                model: effective_model_for_execution(model.as_deref(), &provider)?,
+>>>>>>> theirs
                 provider,
                 output_format,
                 allowed_tools,
@@ -481,7 +529,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         other if other.starts_with('/') => parse_direct_slash_cli_action(&rest, output_format),
         _other => Ok(CliAction::Prompt {
             prompt: rest.join(" "),
+<<<<<<< ours
             model,
+=======
+            model: effective_model_for_execution(model.as_deref(), &provider)?,
+>>>>>>> theirs
             provider,
             output_format,
             allowed_tools,
@@ -510,7 +562,11 @@ fn is_help_flag(value: &str) -> bool {
 
 fn parse_single_word_command_alias(
     rest: &[String],
+<<<<<<< ours
     model: &str,
+=======
+    model: Option<&str>,
+>>>>>>> theirs
     provider: &RuntimeProviderConfig,
     permission_mode_override: Option<PermissionMode>,
     output_format: CliOutputFormat,
@@ -523,7 +579,11 @@ fn parse_single_word_command_alias(
         "help" => Some(Ok(CliAction::Help { output_format })),
         "version" => Some(Ok(CliAction::Version { output_format })),
         "status" => Some(Ok(CliAction::Status {
+<<<<<<< ours
             model: model.to_string(),
+=======
+            model: effective_model_for_status(model, provider),
+>>>>>>> theirs
             provider: provider.clone(),
             permission_mode: permission_mode_override.unwrap_or_else(default_permission_mode),
             output_format,
@@ -718,13 +778,98 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
     previous[right_chars.len()]
 }
 
-fn resolve_model_alias(model: &str) -> &str {
-    match model {
-        "opus" => "claude-opus-4-6",
-        "sonnet" => "claude-sonnet-4-6",
-        "haiku" => "claude-haiku-4-5-20251213",
-        _ => model,
+fn resolve_model_alias(model: &str, provider: &RuntimeProviderConfig) -> String {
+    api::resolve_model_alias_for_provider(model, Some(provider))
+}
+
+fn configured_model_for_current_dir() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    loader.load().ok()?.model().map(ToOwned::to_owned)
+}
+
+fn configured_provider_for_current_dir() -> RuntimeProviderConfig {
+    let Ok(cwd) = env::current_dir() else {
+        return RuntimeProviderConfig::default();
+    };
+    let loader = ConfigLoader::default_for(&cwd);
+    loader
+        .load()
+        .ok()
+        .map(|config| config.provider().clone())
+        .unwrap_or_default()
+}
+
+fn configured_or_default_model_for_current_dir(provider: &RuntimeProviderConfig) -> String {
+    effective_model_for_status(configured_model_for_current_dir().as_deref(), provider)
+}
+
+fn provider_default_model(provider: &RuntimeProviderConfig) -> Option<String> {
+    api::resolve_default_model(Some(provider)).ok().flatten()
+}
+
+fn effective_model_for_execution(
+    model: Option<&str>,
+    provider: &RuntimeProviderConfig,
+) -> Result<String, String> {
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        return Ok(resolve_model_alias(model, provider));
     }
+    if let Some(model) = provider_default_model(provider) {
+        return Ok(model);
+    }
+    if let Some(provider_id) = provider.id() {
+        if provider_metadata_by_id(provider_id).is_none() {
+            return Err(format!(
+                "unsupported provider '{provider_id}'. Run `claw --help` for supported values."
+            ));
+        }
+        return Err(format!(
+            "provider {provider_id} does not define a default model. Pass --model MODEL or set one in config."
+        ));
+    }
+    Ok(DEFAULT_MODEL.to_string())
+}
+
+fn effective_model_for_status(model: Option<&str>, provider: &RuntimeProviderConfig) -> String {
+    effective_model_for_execution(model, provider)
+        .unwrap_or_else(|_| UNCONFIGURED_MODEL.to_string())
+}
+
+fn provider_display_name(model: &str, provider_config: &RuntimeProviderConfig) -> String {
+    if let Ok(metadata) = resolve_provider_metadata(model, Some(provider_config)) {
+        return metadata.display_name.to_string();
+    }
+    if let Some(provider_id) = provider_config.id() {
+        return provider_metadata_by_id(provider_id)
+            .map(|metadata| metadata.display_name.to_string())
+            .unwrap_or_else(|| provider_id.to_string());
+    }
+    metadata_for_model(model)
+        .map(|metadata| metadata.display_name.to_string())
+        .unwrap_or_else(|| "Auto".to_string())
+}
+
+fn provider_resolved_id(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
+    resolve_provider_metadata(model, Some(provider_config))
+        .ok()
+        .map(|metadata| metadata.id.to_string())
+        .or_else(|| provider_config.id().map(ToOwned::to_owned))
+}
+
+fn provider_base_url(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
+    resolve_provider_metadata(model, Some(provider_config))
+        .ok()
+        .and_then(|metadata| api::base_url_for_provider(metadata, Some(provider_config)).ok())
+        .or_else(|| provider_config.base_url().map(ToOwned::to_owned))
+}
+
+fn provider_json_value(model: &str, provider_config: &RuntimeProviderConfig) -> serde_json::Value {
+    json!({
+        "id": provider_resolved_id(model, provider_config),
+        "display_name": provider_display_name(model, provider_config),
+        "base_url": provider_base_url(model, provider_config),
+    })
 }
 
 fn configured_model_for_current_dir() -> Option<String> {
@@ -1098,10 +1243,15 @@ fn env_var_present(key: &str) -> bool {
 }
 
 fn check_auth_health() -> DiagnosticCheck {
+<<<<<<< ours
     let model = configured_model_for_current_dir()
         .map(|value| resolve_model_alias(&value).to_string())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let provider = configured_provider_for_current_dir();
+=======
+    let provider = configured_provider_for_current_dir();
+    let model = configured_or_default_model_for_current_dir(&provider);
+>>>>>>> theirs
     let metadata = match resolve_provider_metadata(&model, Some(&provider)) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -1278,7 +1428,12 @@ fn check_config_health(
     match config {
         Ok(runtime_config) => {
             let loaded_entries = runtime_config.loaded_entries();
+<<<<<<< ours
             let resolved_model = runtime_config.model().unwrap_or(DEFAULT_MODEL);
+=======
+            let resolved_model =
+                effective_model_for_status(runtime_config.model(), runtime_config.provider());
+>>>>>>> theirs
             let mut details = vec![format!(
                 "Config files      loaded {}/{}",
                 loaded_entries.len(),
@@ -1287,7 +1442,11 @@ fn check_config_health(
             details.push(format!("Resolved model    {resolved_model}"));
             details.push(format!(
                 "Resolved provider {}",
+<<<<<<< ours
                 provider_display_name(resolved_model, runtime_config.provider())
+=======
+                provider_display_name(&resolved_model, runtime_config.provider())
+>>>>>>> theirs
             ));
             details.push(format!(
                 "MCP servers       {}",
@@ -1411,8 +1570,13 @@ fn check_system_health(cwd: &Path, config: Option<&runtime::RuntimeConfig>) -> D
         format!("Build target     {}", BUILD_TARGET.unwrap_or("<unknown>")),
         format!("Git SHA          {}", GIT_SHA.unwrap_or("<unknown>")),
     ];
-    if let Some(model) = config.and_then(runtime::RuntimeConfig::model) {
-        details.push(format!("Default model    {model}"));
+    if let Some(config) = config {
+        let resolved_model = effective_model_for_status(config.model(), config.provider());
+        details.push(format!("Default model    {resolved_model}"));
+        details.push(format!(
+            "Default provider {}",
+            provider_display_name(&resolved_model, config.provider())
+        ));
     }
     if let Some(config) = config {
         details.push(format!(
@@ -1520,11 +1684,16 @@ fn default_oauth_config() -> OAuthConfig {
 fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
+<<<<<<< ours
     let model = config
         .model()
         .map(|value| resolve_model_alias(value).to_string())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let provider = config.provider().clone();
+=======
+    let provider = config.provider().clone();
+    let model = effective_model_for_status(config.model(), &provider);
+>>>>>>> theirs
     let metadata = resolve_provider_metadata(&model, Some(&provider))?;
     if metadata.provider != ProviderKind::Anthropic {
         return Err(format!(
@@ -1611,11 +1780,16 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
 fn run_logout(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
+<<<<<<< ours
     let model = config
         .model()
         .map(|value| resolve_model_alias(value).to_string())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let provider = config.provider().clone();
+=======
+    let provider = config.provider().clone();
+    let model = effective_model_for_status(config.model(), &provider);
+>>>>>>> theirs
     let metadata = resolve_provider_metadata(&model, Some(&provider))?;
     if metadata.provider != ProviderKind::Anthropic {
         return Err(format!(
@@ -1792,9 +1966,15 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                         let tracker = UsageTracker::from_session(&session);
                         let usage = tracker.cumulative_usage();
                         let context = status_context(Some(&resolved_path)).expect("status context");
+<<<<<<< ours
                         let resolved_model = configured_model_for_current_dir()
                             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
                         let resolved_provider = configured_provider_for_current_dir();
+=======
+                        let resolved_provider = configured_provider_for_current_dir();
+                        let resolved_model =
+                            configured_or_default_model_for_current_dir(&resolved_provider);
+>>>>>>> theirs
                         let value = json!({
                             "kind": "status",
                             "model": resolved_model,
@@ -2272,7 +2452,7 @@ fn run_resume_command(
         }),
         SlashCommand::Init => Ok(ResumeCommandOutcome {
             session: session.clone(),
-            message: Some(init_claude_md()?),
+            message: Some(init_instruction_file()?),
         }),
         SlashCommand::Diff => Ok(ResumeCommandOutcome {
             session: session.clone(),
@@ -3342,7 +3522,7 @@ impl LiveCli {
             return Ok(false);
         };
 
-        let model = resolve_model_alias(&model).to_string();
+        let model = resolve_model_alias(&model, &self.provider);
 
         if model == self.model {
             println!(
@@ -4423,7 +4603,11 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
             "provider" => json!({
                 "id": runtime_config.provider().id(),
                 "displayName": provider_display_name(
+<<<<<<< ours
                     runtime_config.model().unwrap_or(DEFAULT_MODEL),
+=======
+                    &effective_model_for_status(runtime_config.model(), runtime_config.provider()),
+>>>>>>> theirs
                     runtime_config.provider()
                 ),
                 "baseUrl": runtime_config.provider().base_url(),
@@ -4471,8 +4655,7 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     if project_context.instruction_files.is_empty() {
         lines.push("Discovered files".to_string());
         lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
-                .to_string(),
+            "  No instruction files were discovered in the current directory ancestry.".to_string(),
         );
     } else {
         lines.push("Discovered files".to_string());
@@ -4497,13 +4680,13 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
-fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
+fn init_instruction_file() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     Ok(initialize_repo(&cwd)?.render())
 }
 
 fn run_init(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let message = init_claude_md()?;
+    let message = init_instruction_file()?;
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
         CliOutputFormat::Json => println!(
@@ -5387,6 +5570,10 @@ fn build_runtime_with_plugin_state(
     set_active_provider_override(
         (!effective_provider.is_empty()).then_some(effective_provider.clone()),
     );
+<<<<<<< ours
+=======
+    set_active_model_override(Some(model.clone()));
+>>>>>>> theirs
     plugin_registry.initialize()?;
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
@@ -5807,9 +5994,10 @@ fn slash_command_completion_candidates_with_sessions(
         "/export ",
         "/issue ",
         "/model ",
-        "/model opus",
-        "/model sonnet",
-        "/model haiku",
+        "/model gpt-5",
+        "/model gemini-2.5-pro",
+        "/model grok-3",
+        "/model granite4:3b",
         "/permissions ",
         "/permissions read-only",
         "/permissions workspace-write",
@@ -5836,7 +6024,8 @@ fn slash_command_completion_candidates_with_sessions(
     }
 
     if !model.trim().is_empty() {
-        completions.insert(format!("/model {}", resolve_model_alias(model)));
+        let provider = configured_provider_for_current_dir();
+        completions.insert(format!("/model {}", resolve_model_alias(model, &provider)));
         completions.insert(format!("/model {model}"));
     }
 
@@ -6635,8 +6824,20 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw login")?;
+    writeln!(
+        out,
+        "      Start Anthropic OAuth login (API-key providers do not use this)"
+    )?;
     writeln!(out, "  claw logout")?;
+    writeln!(
+        out,
+        "      Clear saved Anthropic OAuth credentials from this machine"
+    )?;
     writeln!(out, "  claw init")?;
+    writeln!(
+        out,
+        "      Create starter local scaffolding and an AGENTS.md guidance file"
+    )?;
     writeln!(out)?;
     writeln!(out, "Flags:")?;
     writeln!(
@@ -6696,7 +6897,14 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  Use /session list in the REPL to browse managed sessions"
     )?;
     writeln!(out, "Examples:")?;
-    writeln!(out, "  claw --model claude-opus \"summarize this repo\"")?;
+    writeln!(
+        out,
+        "  claw --provider openai --model gpt-5 \"summarize this repo\""
+    )?;
+    writeln!(
+        out,
+        "  claw --provider ollama --model granite4:3b \"review the latest diff\""
+    )?;
     writeln!(
         out,
         "  claw --provider ollama --model claude-sonnet-4-6 \"review the latest diff\""
@@ -7098,10 +7306,17 @@ mod tests {
 
     #[test]
     fn resolves_known_model_aliases() {
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
-        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
-        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251213");
-        assert_eq!(resolve_model_alias("claude-opus"), "claude-opus");
+        let provider = RuntimeProviderConfig::default();
+        assert_eq!(resolve_model_alias("opus", &provider), "claude-opus-4-6");
+        assert_eq!(
+            resolve_model_alias("sonnet", &provider),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            resolve_model_alias("haiku", &provider),
+            "claude-haiku-4-5-20251213"
+        );
+        assert_eq!(resolve_model_alias("claude-opus", &provider), "claude-opus");
     }
 
     #[test]
@@ -7141,6 +7356,11 @@ mod tests {
         let args = vec![
             "--provider".to_string(),
             "ollama".to_string(),
+<<<<<<< ours
+=======
+            "--model".to_string(),
+            "granite4:3b".to_string(),
+>>>>>>> theirs
             "--provider-base-url=http://localhost:11434".to_string(),
             "hello".to_string(),
         ];
@@ -7148,7 +7368,11 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "hello".to_string(),
+<<<<<<< ours
                 model: DEFAULT_MODEL.to_string(),
+=======
+                model: "granite4:3b".to_string(),
+>>>>>>> theirs
                 provider: RuntimeProviderConfig::default()
                     .with_id(Some("ollama".to_string()))
                     .with_base_url(Some("http://localhost:11434".to_string())),
@@ -8268,7 +8492,7 @@ UU conflicted.rs",
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let rendered = crate::init::render_init_claude_md(&workspace_root);
-        assert!(rendered.contains("# CLAUDE.md"));
+        assert!(rendered.contains("# AGENTS.md"));
         assert!(rendered.contains("cargo clippy --workspace --all-targets -- -D warnings"));
     }
 

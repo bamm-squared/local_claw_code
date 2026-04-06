@@ -4,15 +4,16 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use api::{
-    max_tokens_for_model, resolve_model_alias, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    max_tokens_for_model, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
+    MessageResponse, OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
-    grep_search, load_system_prompt,
+    active_model_override, active_provider_override, check_freshness,
+    dedupe_superseded_commit_events, edit_file, execute_bash, glob_search, grep_search,
+    load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -3022,7 +3023,7 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     Err(format!("unknown skill: {requested}"))
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_AGENT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_AGENT_SYSTEM_DATE: &str = "2026-03-31";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
@@ -3184,11 +3185,17 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String>
 }
 
 fn resolve_agent_model(model: Option<&str>) -> String {
-    model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(DEFAULT_AGENT_MODEL)
-        .to_string()
+    let provider_override = active_provider_override();
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        return api::resolve_model_alias_for_provider(model, provider_override.as_ref());
+    }
+    if let Some(model) = active_model_override().filter(|model| !model.trim().is_empty()) {
+        return api::resolve_model_alias_for_provider(&model, provider_override.as_ref());
+    }
+    if let Some(model) = api::resolve_default_model(None).ok().flatten() {
+        return model;
+    }
+    DEFAULT_AGENT_MODEL.to_string()
 }
 
 fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
@@ -3498,7 +3505,8 @@ struct ProviderRuntimeClient {
 impl ProviderRuntimeClient {
     #[allow(clippy::needless_pass_by_value)]
     fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let model = resolve_model_alias(&model).clone();
+        let provider_override = active_provider_override();
+        let model = api::resolve_model_alias_for_provider(&model, provider_override.as_ref());
         let client = ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,

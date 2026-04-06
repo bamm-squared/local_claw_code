@@ -53,9 +53,16 @@ pub use compact::{
     get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
 };
 pub use config::{
+<<<<<<< ours
     active_provider_override, set_active_provider_override, ConfigEntry, ConfigError, ConfigLoader,
     ConfigSource, McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig,
     McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+=======
+    active_model_override, active_provider_override, set_active_model_override,
+    set_active_provider_override, ConfigEntry, ConfigError, ConfigLoader, ConfigSource,
+    McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig,
+    McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+>>>>>>> theirs
     McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     RuntimeProviderConfig, ScopedMcpServerConfig, CLAW_SETTINGS_SCHEMA_NAME,

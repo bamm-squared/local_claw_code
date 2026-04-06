@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-pub const DEFAULT_APP_NAME: &str = "claude-code";
+pub const DEFAULT_APP_NAME: &str = "claw-code";
 pub const DEFAULT_RUNTIME: &str = "rust";
 pub const DEFAULT_AGENTIC_BETA: &str = "claude-code-20250219";
 pub const DEFAULT_PROMPT_CACHING_SCOPE_BETA: &str = "prompt-caching-scope-2026-01-05";
@@ -80,6 +80,12 @@ impl AnthropicRequestProfile {
         if !self.betas.contains(&beta) {
             self.betas.push(beta);
         }
+        self
+    }
+
+    #[must_use]
+    pub fn without_betas(mut self) -> Self {
+        self.betas.clear();
         self
     }
 

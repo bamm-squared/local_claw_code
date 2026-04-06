@@ -10,6 +10,8 @@ const STARTER_CLAW_JSON: &str = concat!(
 );
 const GITIGNORE_COMMENT: &str = "# Claw Code local artifacts";
 const GITIGNORE_ENTRIES: [&str; 2] = [".claw/settings.local.json", ".claw/sessions/"];
+const STARTER_INSTRUCTION_FILE: &str = "AGENTS.md";
+const LEGACY_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAW.md", "CLAUDE.md"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitStatus {
@@ -98,11 +100,11 @@ pub(crate) fn initialize_repo(cwd: &Path) -> Result<InitReport, Box<dyn std::err
         status: ensure_gitignore_entries(&gitignore)?,
     });
 
-    let claude_md = cwd.join("CLAUDE.md");
+    let claude_md = cwd.join(STARTER_INSTRUCTION_FILE);
     let content = render_init_claude_md(cwd);
     artifacts.push(InitArtifact {
-        name: "CLAUDE.md",
-        status: write_file_if_missing(&claude_md, &content)?,
+        name: STARTER_INSTRUCTION_FILE,
+        status: write_instruction_file_if_missing(cwd, &claude_md, &content)?,
     });
 
     Ok(InitReport {
@@ -125,6 +127,20 @@ fn write_file_if_missing(path: &Path, content: &str) -> Result<InitStatus, std::
     }
     fs::write(path, content)?;
     Ok(InitStatus::Created)
+}
+
+fn write_instruction_file_if_missing(
+    cwd: &Path,
+    path: &Path,
+    content: &str,
+) -> Result<InitStatus, std::io::Error> {
+    if LEGACY_INSTRUCTION_FILES
+        .iter()
+        .any(|name| cwd.join(name).exists())
+    {
+        return Ok(InitStatus::Skipped);
+    }
+    write_file_if_missing(path, content)
 }
 
 fn ensure_gitignore_entries(path: &Path) -> Result<InitStatus, std::io::Error> {
@@ -162,9 +178,9 @@ fn ensure_gitignore_entries(path: &Path) -> Result<InitStatus, std::io::Error> {
 pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
     let detection = detect_repo(cwd);
     let mut lines = vec![
-        "# CLAUDE.md".to_string(),
+        "# AGENTS.md".to_string(),
         String::new(),
-        "This file provides guidance to Claw Code (clawcode.dev) when working with code in this repository.".to_string(),
+        "This file provides repository-specific guidance to Claw Code (clawcode.dev) and compatible coding agents when working in this repository.".to_string(),
         String::new(),
     ];
 
@@ -210,7 +226,7 @@ pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
     lines.push("## Working agreement".to_string());
     lines.push("- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.".to_string());
     lines.push("- Keep shared defaults in `.claw.json`; reserve `.claw/settings.local.json` for machine-local overrides.".to_string());
-    lines.push("- Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.".to_string());
+    lines.push("- Treat `AGENTS.md`, `CLAW.md`, and legacy `CLAUDE.md` files as durable instructions; update them intentionally when repo workflows change.".to_string());
     lines.push(String::new());
 
     lines.join("\n")
@@ -358,10 +374,10 @@ mod tests {
         assert!(rendered.contains(".claw.json"));
         assert!(rendered.contains("created"));
         assert!(rendered.contains(".gitignore       created"));
-        assert!(rendered.contains("CLAUDE.md        created"));
+        assert!(rendered.contains("AGENTS.md        created"));
         assert!(root.join(".claw").is_dir());
         assert!(root.join(".claw.json").is_file());
-        assert!(root.join("CLAUDE.md").is_file());
+        assert!(root.join("AGENTS.md").is_file());
         assert_eq!(
             fs::read_to_string(root.join(".claw.json")).expect("read claw json"),
             concat!(
@@ -375,7 +391,7 @@ mod tests {
         let gitignore = fs::read_to_string(root.join(".gitignore")).expect("read gitignore");
         assert!(gitignore.contains(".claw/settings.local.json"));
         assert!(gitignore.contains(".claw/sessions/"));
-        let claude_md = fs::read_to_string(root.join("CLAUDE.md")).expect("read claude md");
+        let claude_md = fs::read_to_string(root.join("AGENTS.md")).expect("read agents md");
         assert!(claude_md.contains("Languages: Rust."));
         assert!(claude_md.contains("cargo clippy --workspace --all-targets -- -D warnings"));
 
@@ -392,14 +408,14 @@ mod tests {
         let first = initialize_repo(&root).expect("first init should succeed");
         assert!(first
             .render()
-            .contains("CLAUDE.md        skipped (already exists)"));
+            .contains("AGENTS.md        skipped (already exists)"));
         let second = initialize_repo(&root).expect("second init should succeed");
         let second_rendered = second.render();
         assert!(second_rendered.contains(".claw/"));
         assert!(second_rendered.contains(".claw.json"));
         assert!(second_rendered.contains("skipped (already exists)"));
         assert!(second_rendered.contains(".gitignore       skipped (already exists)"));
-        assert!(second_rendered.contains("CLAUDE.md        skipped (already exists)"));
+        assert!(second_rendered.contains("AGENTS.md        skipped (already exists)"));
         assert_eq!(
             fs::read_to_string(root.join("CLAUDE.md")).expect("read existing claude md"),
             "custom guidance\n"

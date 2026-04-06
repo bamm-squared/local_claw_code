@@ -117,7 +117,11 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "config",
         aliases: &[],
+<<<<<<< ours
         summary: "Inspect Claude config files or merged sections",
+=======
+        summary: "Inspect runtime config files or merged sections",
+>>>>>>> theirs
         argument_hint: Some("[env|hooks|model|provider|plugins]"),
         resume_supported: true,
     },
@@ -131,14 +135,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "memory",
         aliases: &[],
-        summary: "Inspect loaded Claude instruction memory files",
+        summary: "Inspect loaded instruction memory files",
         argument_hint: None,
         resume_supported: true,
     },
     SlashCommandSpec {
         name: "init",
         aliases: &[],
-        summary: "Create a starter CLAUDE.md for this repo",
+        summary: "Create a starter AGENTS.md for this repo",
         argument_hint: None,
         resume_supported: true,
     },
@@ -532,7 +536,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "api-key",
         aliases: &[],
-        summary: "Show or set the Anthropic API key",
+        summary: "Show provider API-key setup guidance",
         argument_hint: Some("[key]"),
         resume_supported: false,
     },

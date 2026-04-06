@@ -548,6 +548,31 @@ fn provider_override_lock() -> &'static RwLock<Option<RuntimeProviderConfig>> {
     LOCK.get_or_init(|| RwLock::new(None))
 }
 
+<<<<<<< ours
+=======
+#[must_use]
+pub fn active_model_override() -> Option<String> {
+    model_override_lock()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+pub fn set_active_model_override(model: Option<String>) {
+    *model_override_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = model.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+}
+
+fn model_override_lock() -> &'static RwLock<Option<String>> {
+    static LOCK: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(None))
+}
+
+>>>>>>> theirs
 #[must_use]
 /// Returns the default per-user config directory used by the runtime.
 pub fn default_config_home() -> PathBuf {

@@ -37,6 +37,20 @@ pub const NO_PROXY_HOSTS: [&str; 16] = [
     "registry.npmjs.org",
     "index.crates.io",
 ];
+const REMOTE_ENABLE_ENV_KEYS: &[&str] = &["CLAW_REMOTE", "CLAUDE_CODE_REMOTE"];
+const REMOTE_SESSION_ID_ENV_KEYS: &[&str] =
+    &["CLAW_REMOTE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID"];
+const REMOTE_BASE_URL_ENV_KEYS: &[&str] = &[
+    "CLAW_REMOTE_BASE_URL",
+    "CLAW_PROVIDER_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "XAI_BASE_URL",
+    "GEMINI_BASE_URL",
+    "OPENAI_COMPAT_BASE_URL",
+    "ANTHROPIC_COMPAT_BASE_URL",
+    "OLLAMA_BASE_URL",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteSessionContext {
@@ -72,15 +86,11 @@ impl RemoteSessionContext {
     #[must_use]
     pub fn from_env_map(env_map: &BTreeMap<String, String>) -> Self {
         Self {
-            enabled: env_truthy(env_map.get("CLAUDE_CODE_REMOTE")),
-            session_id: env_map
-                .get("CLAUDE_CODE_REMOTE_SESSION_ID")
-                .filter(|value| !value.is_empty())
-                .cloned(),
-            base_url: env_map
-                .get("ANTHROPIC_BASE_URL")
-                .filter(|value| !value.is_empty())
-                .cloned()
+            enabled: REMOTE_ENABLE_ENV_KEYS
+                .iter()
+                .any(|key| env_truthy(env_map.get(*key))),
+            session_id: first_non_empty(env_map, REMOTE_SESSION_ID_ENV_KEYS),
+            base_url: first_non_empty(env_map, REMOTE_BASE_URL_ENV_KEYS)
                 .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string()),
         }
     }
@@ -213,7 +223,16 @@ pub fn upstream_proxy_ws_url(base_url: &str) -> String {
 #[must_use]
 pub fn no_proxy_list() -> String {
     let mut hosts = NO_PROXY_HOSTS.to_vec();
-    hosts.extend(["pypi.org", "files.pythonhosted.org", "proxy.golang.org"]);
+    hosts.extend([
+        "api.openai.com",
+        "openai.com",
+        "x.ai",
+        "api.x.ai",
+        "generativelanguage.googleapis.com",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "proxy.golang.org",
+    ]);
     hosts.join(",")
 }
 
@@ -247,6 +266,17 @@ fn env_truthy(value: Option<&String>) -> bool {
             raw.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
         )
+    })
+}
+
+fn first_non_empty(env_map: &BTreeMap<String, String>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        env_map
+            .get(*key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     })
 }
 

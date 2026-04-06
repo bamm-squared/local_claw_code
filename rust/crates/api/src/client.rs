@@ -50,7 +50,15 @@ impl ProviderClient {
                 let auth = anthropic_auth.unwrap_or(anthropic::auth_source_from_config(
                     providers::anthropic_config_for_metadata(metadata),
                 )?);
+<<<<<<< ours
                 let client = AnthropicClient::from_auth(auth).with_base_url(base_url);
+=======
+                let client = AnthropicClient::from_auth(auth)
+                    .with_base_url(base_url)
+                    .with_request_profile(providers::anthropic_request_profile_for_metadata(
+                        metadata,
+                    ));
+>>>>>>> theirs
                 Ok(match metadata.provider {
                     ProviderKind::Anthropic => Self::Anthropic(client),
                     ProviderKind::AnthropicCompatible => Self::AnthropicCompat(client),
