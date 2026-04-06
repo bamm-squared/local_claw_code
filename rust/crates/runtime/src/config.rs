@@ -548,8 +548,6 @@ fn provider_override_lock() -> &'static RwLock<Option<RuntimeProviderConfig>> {
     LOCK.get_or_init(|| RwLock::new(None))
 }
 
-<<<<<<< ours
-=======
 #[must_use]
 pub fn active_model_override() -> Option<String> {
     model_override_lock()
@@ -572,7 +570,6 @@ fn model_override_lock() -> &'static RwLock<Option<String>> {
     LOCK.get_or_init(|| RwLock::new(None))
 }
 
->>>>>>> theirs
 #[must_use]
 /// Returns the default per-user config directory used by the runtime.
 pub fn default_config_home() -> PathBuf {

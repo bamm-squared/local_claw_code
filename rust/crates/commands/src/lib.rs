@@ -117,11 +117,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "config",
         aliases: &[],
-<<<<<<< ours
-        summary: "Inspect Claude config files or merged sections",
-=======
         summary: "Inspect runtime config files or merged sections",
->>>>>>> theirs
         argument_hint: Some("[env|hooks|model|provider|plugins]"),
         resume_supported: true,
     },

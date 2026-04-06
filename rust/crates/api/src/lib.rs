@@ -18,12 +18,8 @@ pub use providers::anthropic::{AnthropicClient, AnthropicClient as ApiClient, Au
 pub use providers::openai_compat::{OpenAiCompatClient, OpenAiCompatConfig};
 pub use providers::{
     base_url_for_provider, detect_provider_kind, max_tokens_for_model, metadata_for_model,
-<<<<<<< ours
-    provider_metadata_by_id, resolve_model_alias, resolve_provider_metadata, ProviderKind,
-=======
     provider_metadata_by_id, resolve_default_model, resolve_model_alias,
     resolve_model_alias_for_provider, resolve_provider_metadata, ProviderKind,
->>>>>>> theirs
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

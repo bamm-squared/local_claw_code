@@ -56,10 +56,7 @@ High level:
 - Use `--provider-base-url` to override the endpoint when needed.
 - Use config to make a provider and model pair the default for a repo or machine.
 - `claw login` and `claw logout` are only for Anthropic OAuth. Other providers use API keys or local endpoints.
-<<<<<<< ours
-=======
 - `claw init` now scaffolds an `AGENTS.md` instruction file while still honoring legacy `CLAUDE.md` files.
->>>>>>> theirs
 
 See [`RUNLOCAL.md`](./RUNLOCAL.md) for concrete setup examples.
 

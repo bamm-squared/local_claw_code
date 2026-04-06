@@ -38,6 +38,7 @@ Useful health checks:
 - `claw doctor`
 - `claw status`
 - `claw /config provider`
+- `claw init` to scaffold a neutral `AGENTS.md` instruction file for the repo
 
 ## Supported provider ids
 
@@ -222,6 +223,7 @@ Important:
 
 - `claw login` and `claw logout` are Anthropic-only
 - Other providers are configured with env vars and optional base URL overrides
+- Instruction files are provider-neutral now: prefer `AGENTS.md`; legacy `CLAUDE.md` files are still loaded
 
 ## Multi-agent and local models
 

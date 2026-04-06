@@ -44,11 +44,7 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, format_usd, generate_pkce_pair, generate_state,
     load_oauth_credentials, load_system_prompt, parse_oauth_callback_request_target,
-<<<<<<< ours
-    pricing_for_model, resolve_sandbox_status, save_oauth_credentials,
-=======
     pricing_for_model, resolve_sandbox_status, save_oauth_credentials, set_active_model_override,
->>>>>>> theirs
     set_active_provider_override, ApiClient, ApiRequest, AssistantEvent, CompactionConfig,
     ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, ConversationRuntime,
     McpServerManager, McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
@@ -277,15 +273,8 @@ impl CliOutputFormat {
 
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
-<<<<<<< ours
-    let mut model = configured_model_for_current_dir()
-        .map(|value| resolve_model_alias(&value).to_string())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let mut provider = configured_provider_for_current_dir();
-=======
     let mut provider = configured_provider_for_current_dir();
     let mut model = configured_model_for_current_dir();
->>>>>>> theirs
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode_override = None;
     let mut wants_help = false;
@@ -313,28 +302,6 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             flag if flag.starts_with("--model=") => {
                 model = Some(flag[8..].to_string());
-                index += 1;
-            }
-            "--provider" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| "missing value for --provider".to_string())?;
-                provider = provider.with_id(Some(value.clone()));
-                index += 2;
-            }
-            flag if flag.starts_with("--provider=") => {
-                provider = provider.with_id(Some(flag[11..].to_string()));
-                index += 1;
-            }
-            "--provider-base-url" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| "missing value for --provider-base-url".to_string())?;
-                provider = provider.with_base_url(Some(value.clone()));
-                index += 2;
-            }
-            flag if flag.starts_with("--provider-base-url=") => {
-                provider = provider.with_base_url(Some(flag[20..].to_string()));
                 index += 1;
             }
             "--provider" => {
@@ -393,11 +360,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 }
                 return Ok(CliAction::Prompt {
                     prompt,
-<<<<<<< ours
-                    model: resolve_model_alias(&model).to_string(),
-=======
                     model: effective_model_for_execution(model.as_deref(), &provider)?,
->>>>>>> theirs
                     provider,
                     output_format,
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
@@ -457,11 +420,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     if rest.is_empty() {
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         return Ok(CliAction::Repl {
-<<<<<<< ours
-            model,
-=======
             model: effective_model_for_execution(model.as_deref(), &provider)?,
->>>>>>> theirs
             provider,
             allowed_tools,
             permission_mode,
@@ -475,11 +434,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     }
     if let Some(action) = parse_single_word_command_alias(
         &rest,
-<<<<<<< ours
-        &model,
-=======
         model.as_deref(),
->>>>>>> theirs
         &provider,
         permission_mode_override,
         output_format,
@@ -515,11 +470,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             Ok(CliAction::Prompt {
                 prompt,
-<<<<<<< ours
-                model,
-=======
                 model: effective_model_for_execution(model.as_deref(), &provider)?,
->>>>>>> theirs
                 provider,
                 output_format,
                 allowed_tools,
@@ -529,11 +480,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         other if other.starts_with('/') => parse_direct_slash_cli_action(&rest, output_format),
         _other => Ok(CliAction::Prompt {
             prompt: rest.join(" "),
-<<<<<<< ours
-            model,
-=======
             model: effective_model_for_execution(model.as_deref(), &provider)?,
->>>>>>> theirs
             provider,
             output_format,
             allowed_tools,
@@ -562,11 +509,7 @@ fn is_help_flag(value: &str) -> bool {
 
 fn parse_single_word_command_alias(
     rest: &[String],
-<<<<<<< ours
-    model: &str,
-=======
     model: Option<&str>,
->>>>>>> theirs
     provider: &RuntimeProviderConfig,
     permission_mode_override: Option<PermissionMode>,
     output_format: CliOutputFormat,
@@ -579,11 +522,7 @@ fn parse_single_word_command_alias(
         "help" => Some(Ok(CliAction::Help { output_format })),
         "version" => Some(Ok(CliAction::Version { output_format })),
         "status" => Some(Ok(CliAction::Status {
-<<<<<<< ours
-            model: model.to_string(),
-=======
             model: effective_model_for_status(model, provider),
->>>>>>> theirs
             provider: provider.clone(),
             permission_mode: permission_mode_override.unwrap_or_else(default_permission_mode),
             output_format,
@@ -834,60 +773,6 @@ fn effective_model_for_execution(
 fn effective_model_for_status(model: Option<&str>, provider: &RuntimeProviderConfig) -> String {
     effective_model_for_execution(model, provider)
         .unwrap_or_else(|_| UNCONFIGURED_MODEL.to_string())
-}
-
-fn provider_display_name(model: &str, provider_config: &RuntimeProviderConfig) -> String {
-    if let Ok(metadata) = resolve_provider_metadata(model, Some(provider_config)) {
-        return metadata.display_name.to_string();
-    }
-    if let Some(provider_id) = provider_config.id() {
-        return provider_metadata_by_id(provider_id)
-            .map(|metadata| metadata.display_name.to_string())
-            .unwrap_or_else(|| provider_id.to_string());
-    }
-    metadata_for_model(model)
-        .map(|metadata| metadata.display_name.to_string())
-        .unwrap_or_else(|| "Auto".to_string())
-}
-
-fn provider_resolved_id(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
-    resolve_provider_metadata(model, Some(provider_config))
-        .ok()
-        .map(|metadata| metadata.id.to_string())
-        .or_else(|| provider_config.id().map(ToOwned::to_owned))
-}
-
-fn provider_base_url(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
-    resolve_provider_metadata(model, Some(provider_config))
-        .ok()
-        .and_then(|metadata| api::base_url_for_provider(metadata, Some(provider_config)).ok())
-        .or_else(|| provider_config.base_url().map(ToOwned::to_owned))
-}
-
-fn provider_json_value(model: &str, provider_config: &RuntimeProviderConfig) -> serde_json::Value {
-    json!({
-        "id": provider_resolved_id(model, provider_config),
-        "display_name": provider_display_name(model, provider_config),
-        "base_url": provider_base_url(model, provider_config),
-    })
-}
-
-fn configured_model_for_current_dir() -> Option<String> {
-    let cwd = env::current_dir().ok()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    loader.load().ok()?.model().map(ToOwned::to_owned)
-}
-
-fn configured_provider_for_current_dir() -> RuntimeProviderConfig {
-    let Ok(cwd) = env::current_dir() else {
-        return RuntimeProviderConfig::default();
-    };
-    let loader = ConfigLoader::default_for(&cwd);
-    loader
-        .load()
-        .ok()
-        .map(|config| config.provider().clone())
-        .unwrap_or_default()
 }
 
 fn provider_display_name(model: &str, provider_config: &RuntimeProviderConfig) -> String {
@@ -1243,15 +1128,8 @@ fn env_var_present(key: &str) -> bool {
 }
 
 fn check_auth_health() -> DiagnosticCheck {
-<<<<<<< ours
-    let model = configured_model_for_current_dir()
-        .map(|value| resolve_model_alias(&value).to_string())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let provider = configured_provider_for_current_dir();
-=======
     let provider = configured_provider_for_current_dir();
     let model = configured_or_default_model_for_current_dir(&provider);
->>>>>>> theirs
     let metadata = match resolve_provider_metadata(&model, Some(&provider)) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -1428,12 +1306,8 @@ fn check_config_health(
     match config {
         Ok(runtime_config) => {
             let loaded_entries = runtime_config.loaded_entries();
-<<<<<<< ours
-            let resolved_model = runtime_config.model().unwrap_or(DEFAULT_MODEL);
-=======
             let resolved_model =
                 effective_model_for_status(runtime_config.model(), runtime_config.provider());
->>>>>>> theirs
             let mut details = vec![format!(
                 "Config files      loaded {}/{}",
                 loaded_entries.len(),
@@ -1442,11 +1316,7 @@ fn check_config_health(
             details.push(format!("Resolved model    {resolved_model}"));
             details.push(format!(
                 "Resolved provider {}",
-<<<<<<< ours
-                provider_display_name(resolved_model, runtime_config.provider())
-=======
                 provider_display_name(&resolved_model, runtime_config.provider())
->>>>>>> theirs
             ));
             details.push(format!(
                 "MCP servers       {}",
@@ -1578,12 +1448,6 @@ fn check_system_health(cwd: &Path, config: Option<&runtime::RuntimeConfig>) -> D
             provider_display_name(&resolved_model, config.provider())
         ));
     }
-    if let Some(config) = config {
-        details.push(format!(
-            "Default provider {}",
-            provider_display_name(config.model().unwrap_or(DEFAULT_MODEL), config.provider())
-        ));
-    }
     DiagnosticCheck::new(
         "System",
         DiagnosticLevel::Ok,
@@ -1684,16 +1548,8 @@ fn default_oauth_config() -> OAuthConfig {
 fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-<<<<<<< ours
-    let model = config
-        .model()
-        .map(|value| resolve_model_alias(value).to_string())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let provider = config.provider().clone();
-=======
     let provider = config.provider().clone();
     let model = effective_model_for_status(config.model(), &provider);
->>>>>>> theirs
     let metadata = resolve_provider_metadata(&model, Some(&provider))?;
     if metadata.provider != ProviderKind::Anthropic {
         return Err(format!(
@@ -1780,16 +1636,8 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
 fn run_logout(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-<<<<<<< ours
-    let model = config
-        .model()
-        .map(|value| resolve_model_alias(value).to_string())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let provider = config.provider().clone();
-=======
     let provider = config.provider().clone();
     let model = effective_model_for_status(config.model(), &provider);
->>>>>>> theirs
     let metadata = resolve_provider_metadata(&model, Some(&provider))?;
     if metadata.provider != ProviderKind::Anthropic {
         return Err(format!(
@@ -1966,15 +1814,9 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                         let tracker = UsageTracker::from_session(&session);
                         let usage = tracker.cumulative_usage();
                         let context = status_context(Some(&resolved_path)).expect("status context");
-<<<<<<< ours
-                        let resolved_model = configured_model_for_current_dir()
-                            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-                        let resolved_provider = configured_provider_for_current_dir();
-=======
                         let resolved_provider = configured_provider_for_current_dir();
                         let resolved_model =
                             configured_or_default_model_for_current_dir(&resolved_provider);
->>>>>>> theirs
                         let value = json!({
                             "kind": "status",
                             "model": resolved_model,
@@ -4603,11 +4445,7 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
             "provider" => json!({
                 "id": runtime_config.provider().id(),
                 "displayName": provider_display_name(
-<<<<<<< ours
-                    runtime_config.model().unwrap_or(DEFAULT_MODEL),
-=======
                     &effective_model_for_status(runtime_config.model(), runtime_config.provider()),
->>>>>>> theirs
                     runtime_config.provider()
                 ),
                 "baseUrl": runtime_config.provider().base_url(),
@@ -5570,10 +5408,7 @@ fn build_runtime_with_plugin_state(
     set_active_provider_override(
         (!effective_provider.is_empty()).then_some(effective_provider.clone()),
     );
-<<<<<<< ours
-=======
     set_active_model_override(Some(model.clone()));
->>>>>>> theirs
     plugin_registry.initialize()?;
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
@@ -6907,10 +6742,6 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  claw --provider ollama --model claude-sonnet-4-6 \"review the latest diff\""
-    )?;
-    writeln!(
-        out,
         "  claw --output-format json prompt \"explain src/main.rs\""
     )?;
     writeln!(
@@ -7356,11 +7187,8 @@ mod tests {
         let args = vec![
             "--provider".to_string(),
             "ollama".to_string(),
-<<<<<<< ours
-=======
             "--model".to_string(),
             "granite4:3b".to_string(),
->>>>>>> theirs
             "--provider-base-url=http://localhost:11434".to_string(),
             "hello".to_string(),
         ];
@@ -7368,11 +7196,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "hello".to_string(),
-<<<<<<< ours
-                model: DEFAULT_MODEL.to_string(),
-=======
                 model: "granite4:3b".to_string(),
->>>>>>> theirs
                 provider: RuntimeProviderConfig::default()
                     .with_id(Some("ollama".to_string()))
                     .with_base_url(Some("http://localhost:11434".to_string())),
