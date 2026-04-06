@@ -184,6 +184,11 @@ impl Usage {
             |pricing| usage.estimate_cost_usd_with_pricing(pricing),
         )
     }
+
+    #[must_use]
+    pub fn known_model_cost_usd(&self, model: &str) -> Option<UsageCostEstimate> {
+        self.token_usage().estimate_cost_usd_for_known_model(model)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

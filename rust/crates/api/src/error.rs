@@ -8,6 +8,22 @@ pub enum ApiError {
         provider: &'static str,
         env_vars: &'static [&'static str],
     },
+    MissingBaseUrl {
+        provider: &'static str,
+        env_var: &'static str,
+    },
+    UnsupportedProvider {
+        provider: String,
+        supported: &'static [&'static str],
+    },
+    ProviderSelectionRequired {
+        model: String,
+        supported: &'static [&'static str],
+    },
+    AmbiguousProviderSelection {
+        model: String,
+        configured: Vec<&'static str>,
+    },
     ContextWindowExceeded {
         model: String,
         estimated_input_tokens: u32,
@@ -55,6 +71,10 @@ impl ApiError {
             Self::Api { retryable, .. } => *retryable,
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
             Self::MissingCredentials { .. }
+            | Self::MissingBaseUrl { .. }
+            | Self::UnsupportedProvider { .. }
+            | Self::ProviderSelectionRequired { .. }
+            | Self::AmbiguousProviderSelection { .. }
             | Self::ContextWindowExceeded { .. }
             | Self::ExpiredOAuthToken
             | Self::Auth(_)
@@ -74,6 +94,28 @@ impl Display for ApiError {
                 f,
                 "missing {provider} credentials; export {} before calling the {provider} API",
                 env_vars.join(" or ")
+            ),
+            Self::MissingBaseUrl { provider, env_var } => write!(
+                f,
+                "missing {provider} base URL; export {env_var} or configure provider.baseUrl before calling the {provider} API"
+            ),
+            Self::UnsupportedProvider {
+                provider,
+                supported,
+            } => write!(
+                f,
+                "unsupported provider '{provider}'; supported providers: {}",
+                supported.join(", ")
+            ),
+            Self::ProviderSelectionRequired { model, supported } => write!(
+                f,
+                "could not infer a provider for model '{model}'; set --provider or configure provider.id (supported: {})",
+                supported.join(", ")
+            ),
+            Self::AmbiguousProviderSelection { model, configured } => write!(
+                f,
+                "multiple providers are configured for model '{model}'; set --provider or configure provider.id (detected: {})",
+                configured.join(", ")
             ),
             Self::ContextWindowExceeded {
                 model,

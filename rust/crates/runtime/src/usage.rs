@@ -95,6 +95,11 @@ impl TokenUsage {
     }
 
     #[must_use]
+    pub fn estimate_cost_usd_for_known_model(self, model: &str) -> Option<UsageCostEstimate> {
+        pricing_for_model(model).map(|pricing| self.estimate_cost_usd_with_pricing(pricing))
+    }
+
+    #[must_use]
     pub fn estimate_cost_usd_with_pricing(self, pricing: ModelPricing) -> UsageCostEstimate {
         UsageCostEstimate {
             input_cost_usd: cost_for_tokens(self.input_tokens, pricing.input_cost_per_million),
@@ -117,20 +122,31 @@ impl TokenUsage {
 
     #[must_use]
     pub fn summary_lines_for_model(self, label: &str, model: Option<&str>) -> Vec<String> {
-        let pricing = model.and_then(pricing_for_model);
-        let cost = pricing.map_or_else(
-            || self.estimate_cost_usd(),
-            |pricing| self.estimate_cost_usd_with_pricing(pricing),
-        );
         let model_suffix =
             model.map_or_else(String::new, |model_name| format!(" model={model_name}"));
-        let pricing_suffix = if pricing.is_some() {
-            ""
-        } else if model.is_some() {
-            " pricing=estimated-default"
+        let cost = model
+            .and_then(|model_name| self.estimate_cost_usd_for_known_model(model_name))
+            .or_else(|| model.is_none().then(|| self.estimate_cost_usd()));
+        let estimated_cost = cost
+            .map(|value| format_usd(value.total_cost_usd()))
+            .unwrap_or_else(|| "n/a".to_string());
+        let pricing_suffix = if model.is_some() && cost.is_none() {
+            " pricing=unavailable"
         } else {
             ""
         };
+        let breakdown = cost.map_or_else(
+            || "  cost breakdown: unavailable for this model".to_string(),
+            |value| {
+                format!(
+                    "  cost breakdown: input={} output={} cache_write={} cache_read={}",
+                    format_usd(value.input_cost_usd),
+                    format_usd(value.output_cost_usd),
+                    format_usd(value.cache_creation_cost_usd),
+                    format_usd(value.cache_read_cost_usd),
+                )
+            },
+        );
         vec![
             format!(
                 "{label}: total_tokens={} input={} output={} cache_write={} cache_read={} estimated_cost={}{}{}",
@@ -139,17 +155,11 @@ impl TokenUsage {
                 self.output_tokens,
                 self.cache_creation_input_tokens,
                 self.cache_read_input_tokens,
-                format_usd(cost.total_cost_usd()),
+                estimated_cost,
                 model_suffix,
                 pricing_suffix,
             ),
-            format!(
-                "  cost breakdown: input={} output={} cache_write={} cache_read={}",
-                format_usd(cost.input_cost_usd),
-                format_usd(cost.output_cost_usd),
-                format_usd(cost.cache_creation_cost_usd),
-                format_usd(cost.cache_read_cost_usd),
-            ),
+            breakdown,
         ]
     }
 }

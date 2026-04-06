@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use crate::json::JsonValue;
 use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
@@ -50,6 +51,13 @@ pub struct RuntimePluginConfig {
     bundled_root: Option<String>,
 }
 
+/// Provider settings used to resolve the active model backend.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeProviderConfig {
+    id: Option<String>,
+    base_url: Option<String>,
+}
+
 /// Structured feature configuration consumed by runtime subsystems.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeFeatureConfig {
@@ -58,6 +66,7 @@ pub struct RuntimeFeatureConfig {
     mcp: McpConfigCollection,
     oauth: Option<OAuthConfig>,
     model: Option<String>,
+    provider: RuntimeProviderConfig,
     permission_mode: Option<ResolvedPermissionMode>,
     permission_rules: RuntimePermissionRuleConfig,
     sandbox: SandboxConfig,
@@ -280,6 +289,7 @@ impl ConfigLoader {
             },
             oauth: parse_optional_oauth_config(&merged_value, "merged settings.oauth")?,
             model: parse_optional_model(&merged_value),
+            provider: parse_optional_provider_config(&merged_value)?,
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             permission_rules: parse_optional_permission_rules(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
@@ -354,6 +364,11 @@ impl RuntimeConfig {
     }
 
     #[must_use]
+    pub fn provider(&self) -> &RuntimeProviderConfig {
+        &self.feature_config.provider
+    }
+
+    #[must_use]
     pub fn permission_mode(&self) -> Option<ResolvedPermissionMode> {
         self.feature_config.permission_mode
     }
@@ -405,6 +420,11 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> &RuntimeProviderConfig {
+        &self.provider
     }
 
     #[must_use]
@@ -460,6 +480,72 @@ impl RuntimePluginConfig {
             .copied()
             .unwrap_or(default_enabled)
     }
+}
+
+impl RuntimeProviderConfig {
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    #[must_use]
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_id(mut self, id: Option<String>) -> Self {
+        self.id = id.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
+        self.base_url = base_url.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.id.is_none() && self.base_url.is_none()
+    }
+
+    #[must_use]
+    pub fn merged_with(&self, override_config: &Self) -> Self {
+        Self {
+            id: override_config.id.clone().or_else(|| self.id.clone()),
+            base_url: override_config
+                .base_url
+                .clone()
+                .or_else(|| self.base_url.clone()),
+        }
+    }
+}
+
+#[must_use]
+pub fn active_provider_override() -> Option<RuntimeProviderConfig> {
+    provider_override_lock()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+pub fn set_active_provider_override(config: Option<RuntimeProviderConfig>) {
+    *provider_override_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        config.filter(|value| !value.is_empty());
+}
+
+fn provider_override_lock() -> &'static RwLock<Option<RuntimeProviderConfig>> {
+    static LOCK: OnceLock<RwLock<Option<RuntimeProviderConfig>>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(None))
 }
 
 #[must_use]
@@ -635,6 +721,37 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
         .and_then(|object| object.get("model"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn parse_optional_provider_config(root: &JsonValue) -> Result<RuntimeProviderConfig, ConfigError> {
+    let Some(object) = root.as_object() else {
+        return Ok(RuntimeProviderConfig::default());
+    };
+
+    let top_level_base_url =
+        optional_string(object, "providerBaseUrl", "merged settings")?.map(str::to_string);
+    let Some(provider_value) = object.get("provider") else {
+        return Ok(RuntimeProviderConfig::default().with_base_url(top_level_base_url));
+    };
+
+    match provider_value {
+        JsonValue::String(value) => Ok(RuntimeProviderConfig::default()
+            .with_id(Some(value.clone()))
+            .with_base_url(top_level_base_url)),
+        JsonValue::Object(provider) => Ok(RuntimeProviderConfig::default()
+            .with_id(
+                optional_string(provider, "id", "merged settings.provider")?.map(str::to_string),
+            )
+            .with_base_url(
+                optional_string(provider, "baseUrl", "merged settings.provider")?
+                    .map(str::to_string)
+                    .or(top_level_base_url),
+            )),
+        other => Err(ConfigError::Parse(format!(
+            "merged settings.provider: expected string or object, found {}",
+            describe_json_value(other)
+        ))),
+    }
 }
 
 fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, ConfigError> {
@@ -856,6 +973,17 @@ fn infer_mcp_server_type(object: &BTreeMap<String, JsonValue>) -> &'static str {
         "http"
     } else {
         "stdio"
+    }
+}
+
+fn describe_json_value(value: &JsonValue) -> &'static str {
+    match value {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "boolean",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
     }
 }
 

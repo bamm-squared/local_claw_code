@@ -24,9 +24,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    oauth_token_is_expired, resolve_startup_auth_source, AnthropicClient, AuthSource,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, PromptCache, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    metadata_for_model, oauth_token_is_expired, provider_metadata_by_id, resolve_provider_metadata,
+    resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache, ProviderClient,
+    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
     ToolResultContentBlock,
 };
 
@@ -43,12 +44,13 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, format_usd, generate_pkce_pair, generate_state,
     load_oauth_credentials, load_system_prompt, parse_oauth_callback_request_target,
-    pricing_for_model, resolve_sandbox_status, save_oauth_credentials, ApiClient, ApiRequest,
-    AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, ConversationRuntime, McpServerManager, McpTool, MessageRole, ModelPricing,
-    OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
-    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    pricing_for_model, resolve_sandbox_status, save_oauth_credentials,
+    set_active_provider_override, ApiClient, ApiRequest, AssistantEvent, CompactionConfig,
+    ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, ConversationRuntime,
+    McpServerManager, McpTool, MessageRole, ModelPricing, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    ResolvedPermissionMode, RuntimeError, RuntimeProviderConfig, Session, TokenUsage, ToolError,
+    ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -56,11 +58,7 @@ use tools::{GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
-        32_000
-    } else {
-        64_000
-    }
+    api::max_tokens_for_model(model)
 }
 const DEFAULT_DATE: &str = "2026-03-31";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
@@ -78,6 +76,8 @@ const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--version",
     "-V",
     "--model",
+    "--provider",
+    "--provider-base-url",
     "--output-format",
     "--permission-mode",
     "--dangerously-skip-permissions",
@@ -140,17 +140,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => resume_session(&session_path, &commands, output_format),
         CliAction::Status {
             model,
+            provider,
             permission_mode,
             output_format,
-        } => print_status_snapshot(&model, permission_mode, output_format)?,
+        } => print_status_snapshot(&model, &provider, permission_mode, output_format)?,
         CliAction::Sandbox { output_format } => print_sandbox_status_snapshot(output_format)?,
         CliAction::Prompt {
             prompt,
             model,
+            provider,
             output_format,
             allowed_tools,
             permission_mode,
-        } => LiveCli::new(model, true, allowed_tools, permission_mode)?
+        } => LiveCli::new(model, provider, true, allowed_tools, permission_mode)?
             .run_turn_with_output(&prompt, output_format)?,
         CliAction::Login { output_format } => run_login(output_format)?,
         CliAction::Logout { output_format } => run_logout(output_format)?,
@@ -158,9 +160,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Init { output_format } => run_init(output_format)?,
         CliAction::Repl {
             model,
+            provider,
             allowed_tools,
             permission_mode,
-        } => run_repl(model, allowed_tools, permission_mode)?,
+        } => run_repl(model, provider, allowed_tools, permission_mode)?,
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
     }
@@ -202,6 +205,7 @@ enum CliAction {
     },
     Status {
         model: String,
+        provider: RuntimeProviderConfig,
         permission_mode: PermissionMode,
         output_format: CliOutputFormat,
     },
@@ -211,6 +215,7 @@ enum CliAction {
     Prompt {
         prompt: String,
         model: String,
+        provider: RuntimeProviderConfig,
         output_format: CliOutputFormat,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
@@ -229,6 +234,7 @@ enum CliAction {
     },
     Repl {
         model: String,
+        provider: RuntimeProviderConfig,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
     },
@@ -266,7 +272,10 @@ impl CliOutputFormat {
 
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
-    let mut model = DEFAULT_MODEL.to_string();
+    let mut model = configured_model_for_current_dir()
+        .map(|value| resolve_model_alias(&value).to_string())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let mut provider = configured_provider_for_current_dir();
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode_override = None;
     let mut wants_help = false;
@@ -294,6 +303,28 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             flag if flag.starts_with("--model=") => {
                 model = resolve_model_alias(&flag[8..]).to_string();
+                index += 1;
+            }
+            "--provider" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --provider".to_string())?;
+                provider = provider.with_id(Some(value.clone()));
+                index += 2;
+            }
+            flag if flag.starts_with("--provider=") => {
+                provider = provider.with_id(Some(flag[11..].to_string()));
+                index += 1;
+            }
+            "--provider-base-url" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --provider-base-url".to_string())?;
+                provider = provider.with_base_url(Some(value.clone()));
+                index += 2;
+            }
+            flag if flag.starts_with("--provider-base-url=") => {
+                provider = provider.with_base_url(Some(flag[20..].to_string()));
                 index += 1;
             }
             "--output-format" => {
@@ -331,6 +362,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 return Ok(CliAction::Prompt {
                     prompt,
                     model: resolve_model_alias(&model).to_string(),
+                    provider,
                     output_format,
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
                     permission_mode: permission_mode_override
@@ -390,6 +422,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         return Ok(CliAction::Repl {
             model,
+            provider,
             allowed_tools,
             permission_mode,
         });
@@ -400,9 +433,13 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     if let Some(action) = parse_local_help_action(&rest) {
         return action;
     }
-    if let Some(action) =
-        parse_single_word_command_alias(&rest, &model, permission_mode_override, output_format)
-    {
+    if let Some(action) = parse_single_word_command_alias(
+        &rest,
+        &model,
+        &provider,
+        permission_mode_override,
+        output_format,
+    ) {
         return action;
     }
 
@@ -435,6 +472,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             Ok(CliAction::Prompt {
                 prompt,
                 model,
+                provider,
                 output_format,
                 allowed_tools,
                 permission_mode,
@@ -444,6 +482,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         _other => Ok(CliAction::Prompt {
             prompt: rest.join(" "),
             model,
+            provider,
             output_format,
             allowed_tools,
             permission_mode,
@@ -472,6 +511,7 @@ fn is_help_flag(value: &str) -> bool {
 fn parse_single_word_command_alias(
     rest: &[String],
     model: &str,
+    provider: &RuntimeProviderConfig,
     permission_mode_override: Option<PermissionMode>,
     output_format: CliOutputFormat,
 ) -> Option<Result<CliAction, String>> {
@@ -484,6 +524,7 @@ fn parse_single_word_command_alias(
         "version" => Some(Ok(CliAction::Version { output_format })),
         "status" => Some(Ok(CliAction::Status {
             model: model.to_string(),
+            provider: provider.clone(),
             permission_mode: permission_mode_override.unwrap_or_else(default_permission_mode),
             output_format,
         })),
@@ -684,6 +725,60 @@ fn resolve_model_alias(model: &str) -> &str {
         "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
     }
+}
+
+fn configured_model_for_current_dir() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    loader.load().ok()?.model().map(ToOwned::to_owned)
+}
+
+fn configured_provider_for_current_dir() -> RuntimeProviderConfig {
+    let Ok(cwd) = env::current_dir() else {
+        return RuntimeProviderConfig::default();
+    };
+    let loader = ConfigLoader::default_for(&cwd);
+    loader
+        .load()
+        .ok()
+        .map(|config| config.provider().clone())
+        .unwrap_or_default()
+}
+
+fn provider_display_name(model: &str, provider_config: &RuntimeProviderConfig) -> String {
+    if let Ok(metadata) = resolve_provider_metadata(model, Some(provider_config)) {
+        return metadata.display_name.to_string();
+    }
+    if let Some(provider_id) = provider_config.id() {
+        return provider_metadata_by_id(provider_id)
+            .map(|metadata| metadata.display_name.to_string())
+            .unwrap_or_else(|| provider_id.to_string());
+    }
+    metadata_for_model(model)
+        .map(|metadata| metadata.display_name.to_string())
+        .unwrap_or_else(|| "Auto".to_string())
+}
+
+fn provider_resolved_id(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
+    resolve_provider_metadata(model, Some(provider_config))
+        .ok()
+        .map(|metadata| metadata.id.to_string())
+        .or_else(|| provider_config.id().map(ToOwned::to_owned))
+}
+
+fn provider_base_url(model: &str, provider_config: &RuntimeProviderConfig) -> Option<String> {
+    resolve_provider_metadata(model, Some(provider_config))
+        .ok()
+        .and_then(|metadata| api::base_url_for_provider(metadata, Some(provider_config)).ok())
+        .or_else(|| provider_config.base_url().map(ToOwned::to_owned))
+}
+
+fn provider_json_value(model: &str, provider_config: &RuntimeProviderConfig) -> serde_json::Value {
+    json!({
+        "id": provider_resolved_id(model, provider_config),
+        "display_name": provider_display_name(model, provider_config),
+        "base_url": provider_base_url(model, provider_config),
+    })
 }
 
 fn normalize_allowed_tools(values: &[String]) -> Result<Option<AllowedToolSet>, String> {
@@ -996,34 +1091,85 @@ fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn check_auth_health() -> DiagnosticCheck {
-    let api_key_present = env::var("ANTHROPIC_API_KEY")
+fn env_var_present(key: &str) -> bool {
+    env::var(key)
         .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let auth_token_present = env::var("ANTHROPIC_AUTH_TOKEN")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+        .is_some_and(|value| !value.trim().is_empty())
+}
 
-    match load_oauth_credentials() {
-        Ok(Some(token_set)) => {
-            let expired = oauth_token_is_expired(&api::OAuthTokenSet {
-                access_token: token_set.access_token.clone(),
-                refresh_token: token_set.refresh_token.clone(),
-                expires_at: token_set.expires_at,
-                scopes: token_set.scopes.clone(),
-            });
-            let mut details = vec![
+fn check_auth_health() -> DiagnosticCheck {
+    let model = configured_model_for_current_dir()
+        .map(|value| resolve_model_alias(&value).to_string())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let provider = configured_provider_for_current_dir();
+    let metadata = match resolve_provider_metadata(&model, Some(&provider)) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return DiagnosticCheck::new(
+                "Auth",
+                DiagnosticLevel::Warn,
+                format!("provider selection needs attention: {error}"),
+            )
+            .with_details(vec![
+                format!("Model            {model}"),
+                format!("Configured provider {}", provider.id().unwrap_or("<auto>")),
                 format!(
-                    "Environment       api_key={} auth_token={}",
-                    if api_key_present { "present" } else { "absent" },
-                    if auth_token_present {
-                        "present"
-                    } else {
-                        "absent"
-                    }
+                    "Configured base   {}",
+                    provider.base_url().unwrap_or("<default>")
                 ),
-                format!(
-                    "Saved OAuth       expires_at={} refresh_token={} scopes={}",
+            ]);
+        }
+    };
+
+    let primary_auth_present = env_var_present(metadata.auth_env);
+    let secondary_auth_present = metadata.auth_env_secondary.is_some_and(env_var_present);
+    let base_url_present = provider.base_url().is_some() || env_var_present(metadata.base_url_env);
+    let base_url_available = base_url_present || metadata.default_base_url.is_some();
+    let mut details = vec![
+        format!("Provider         {}", metadata.display_name),
+        format!("Model            {model}"),
+        format!(
+            "Credentials      {}={} {}={}",
+            metadata.auth_env,
+            if primary_auth_present {
+                "present"
+            } else {
+                "absent"
+            },
+            metadata.auth_env_secondary.unwrap_or("<none>"),
+            if secondary_auth_present {
+                "present"
+            } else {
+                "absent"
+            }
+        ),
+        format!(
+            "Base URL         {}={} effective={}",
+            metadata.base_url_env,
+            if env_var_present(metadata.base_url_env) {
+                "present"
+            } else {
+                "absent"
+            },
+            provider.base_url().unwrap_or_else(|| {
+                metadata
+                    .default_base_url
+                    .unwrap_or("<required via config or env>")
+            })
+        ),
+    ];
+
+    if metadata.provider == ProviderKind::Anthropic {
+        return match load_oauth_credentials() {
+            Ok(Some(token_set)) => {
+                let expired = oauth_token_is_expired(&api::OAuthTokenSet {
+                    access_token: token_set.access_token.clone(),
+                    refresh_token: token_set.refresh_token.clone(),
+                    expires_at: token_set.expires_at,
+                    scopes: token_set.scopes.clone(),
+                });
+                details.push(format!(
+                    "Saved OAuth      expires_at={} refresh_token={} scopes={}",
                     token_set
                         .expires_at
                         .map_or_else(|| "<none>".to_string(), |value| value.to_string()),
@@ -1037,58 +1183,86 @@ fn check_auth_health() -> DiagnosticCheck {
                     } else {
                         token_set.scopes.join(",")
                     }
-                ),
-            ];
-            if expired {
-                details.push(
-                    "Suggested action  claw login to refresh local OAuth credentials".to_string(),
-                );
+                ));
+                if expired {
+                    details.push(
+                        "Suggested action claw login to refresh local OAuth credentials"
+                            .to_string(),
+                    );
+                }
+                DiagnosticCheck::new(
+                    "Auth",
+                    if expired {
+                        DiagnosticLevel::Warn
+                    } else if primary_auth_present || secondary_auth_present {
+                        DiagnosticLevel::Ok
+                    } else {
+                        DiagnosticLevel::Ok
+                    },
+                    if expired {
+                        "saved OAuth credentials are present but expired"
+                    } else if primary_auth_present || secondary_auth_present {
+                        "environment and Anthropic OAuth credentials are available"
+                    } else {
+                        "saved Anthropic OAuth credentials are available"
+                    },
+                )
+                .with_details(details)
             }
-            DiagnosticCheck::new(
+            Ok(None) => DiagnosticCheck::new(
                 "Auth",
-                if expired {
-                    DiagnosticLevel::Warn
-                } else {
+                if primary_auth_present || secondary_auth_present {
                     DiagnosticLevel::Ok
-                },
-                if expired {
-                    "saved OAuth credentials are present but expired"
-                } else if api_key_present || auth_token_present {
-                    "environment and saved credentials are available"
                 } else {
-                    "saved OAuth credentials are available"
+                    DiagnosticLevel::Warn
+                },
+                if primary_auth_present || secondary_auth_present {
+                    "Anthropic environment credentials are configured"
+                } else {
+                    "Anthropic credentials are missing; configure env vars or run claw login"
                 },
             )
-            .with_details(details)
-        }
-        Ok(None) => DiagnosticCheck::new(
-            "Auth",
-            if api_key_present || auth_token_present {
-                DiagnosticLevel::Ok
-            } else {
-                DiagnosticLevel::Warn
-            },
-            if api_key_present || auth_token_present {
-                "environment credentials are configured"
-            } else {
-                "no API key or saved OAuth credentials were found"
-            },
-        )
-        .with_details(vec![format!(
-            "Environment       api_key={} auth_token={}",
-            if api_key_present { "present" } else { "absent" },
-            if auth_token_present {
-                "present"
-            } else {
-                "absent"
-            }
-        )]),
-        Err(error) => DiagnosticCheck::new(
-            "Auth",
-            DiagnosticLevel::Fail,
-            format!("failed to inspect saved credentials: {error}"),
-        ),
+            .with_details(details),
+            Err(error) => DiagnosticCheck::new(
+                "Auth",
+                DiagnosticLevel::Fail,
+                format!("failed to inspect saved credentials: {error}"),
+            )
+            .with_details(details),
+        };
     }
+
+    let auth_available =
+        primary_auth_present || secondary_auth_present || metadata.fallback_auth.is_some();
+    let level = if !base_url_available {
+        DiagnosticLevel::Warn
+    } else if auth_available {
+        DiagnosticLevel::Ok
+    } else {
+        DiagnosticLevel::Warn
+    };
+    let summary = if !base_url_available {
+        format!(
+            "{} requires a base URL; configure {} or provider.baseUrl",
+            metadata.display_name, metadata.base_url_env
+        )
+    } else if auth_available {
+        if metadata.fallback_auth.is_some() && !primary_auth_present && !secondary_auth_present {
+            format!(
+                "{} is ready with its local compatibility defaults",
+                metadata.display_name
+            )
+        } else {
+            format!("{} credentials are configured", metadata.display_name)
+        }
+    } else {
+        format!(
+            "{} credentials are missing; configure {}",
+            metadata.display_name, metadata.auth_env
+        )
+    };
+
+    DiagnosticCheck::new("Auth", level, summary).with_details(details)
 }
 
 fn check_config_health(
@@ -1104,14 +1278,17 @@ fn check_config_health(
     match config {
         Ok(runtime_config) => {
             let loaded_entries = runtime_config.loaded_entries();
+            let resolved_model = runtime_config.model().unwrap_or(DEFAULT_MODEL);
             let mut details = vec![format!(
                 "Config files      loaded {}/{}",
                 loaded_entries.len(),
                 discovered_count
             )];
-            if let Some(model) = runtime_config.model() {
-                details.push(format!("Resolved model    {model}"));
-            }
+            details.push(format!("Resolved model    {resolved_model}"));
+            details.push(format!(
+                "Resolved provider {}",
+                provider_display_name(resolved_model, runtime_config.provider())
+            ));
             details.push(format!(
                 "MCP servers       {}",
                 runtime_config.mcp().servers().len()
@@ -1237,6 +1414,12 @@ fn check_system_health(cwd: &Path, config: Option<&runtime::RuntimeConfig>) -> D
     if let Some(model) = config.and_then(runtime::RuntimeConfig::model) {
         details.push(format!("Default model    {model}"));
     }
+    if let Some(config) = config {
+        details.push(format!(
+            "Default provider {}",
+            provider_display_name(config.model().unwrap_or(DEFAULT_MODEL), config.provider())
+        ));
+    }
     DiagnosticCheck::new(
         "System",
         DiagnosticLevel::Ok,
@@ -1337,6 +1520,25 @@ fn default_oauth_config() -> OAuthConfig {
 fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config = ConfigLoader::default_for(&cwd).load()?;
+    let model = config
+        .model()
+        .map(|value| resolve_model_alias(value).to_string())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let provider = config.provider().clone();
+    let metadata = resolve_provider_metadata(&model, Some(&provider))?;
+    if metadata.provider != ProviderKind::Anthropic {
+        return Err(format!(
+            "`claw login` only supports Anthropic OAuth. Active provider: {}. Configure {}{} instead.",
+            metadata.display_name,
+            metadata.auth_env,
+            if metadata.default_base_url.is_none() {
+                format!(" and {}", metadata.base_url_env)
+            } else {
+                String::new()
+            }
+        )
+        .into());
+    }
     let default_oauth = default_oauth_config();
     let oauth = config.oauth().unwrap_or(&default_oauth);
     let callback_port = oauth.callback_port.unwrap_or(DEFAULT_OAUTH_CALLBACK_PORT);
@@ -1348,7 +1550,7 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
             .build_url();
 
     if output_format == CliOutputFormat::Text {
-        println!("Starting Claude OAuth login...");
+        println!("Starting Anthropic OAuth login...");
         println!("Listening for callback on {redirect_uri}");
     }
     if let Err(error) = open_browser(&authorize_url) {
@@ -1373,7 +1575,8 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
         return Err(io::Error::new(io::ErrorKind::InvalidData, "oauth state mismatch").into());
     }
 
-    let client = AnthropicClient::from_auth(AuthSource::None).with_base_url(api::read_base_url());
+    let client = AnthropicClient::from_auth(AuthSource::None)
+        .with_base_url(api::base_url_for_provider(metadata, Some(&provider))?);
     let exchange_request = OAuthTokenExchangeRequest::from_config(
         oauth,
         code,
@@ -1390,14 +1593,15 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
         scopes: token_set.scopes,
     })?;
     match output_format {
-        CliOutputFormat::Text => println!("Claude OAuth login complete."),
+        CliOutputFormat::Text => println!("Anthropic OAuth login complete."),
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "login",
+                "provider": provider_json_value(&model, &provider),
                 "callback_port": callback_port,
                 "redirect_uri": redirect_uri,
-                "message": "Claude OAuth login complete.",
+                "message": "Anthropic OAuth login complete.",
             }))?
         ),
     }
@@ -1405,14 +1609,30 @@ fn run_login(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::E
 }
 
 fn run_logout(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let config = ConfigLoader::default_for(&cwd).load()?;
+    let model = config
+        .model()
+        .map(|value| resolve_model_alias(value).to_string())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let provider = config.provider().clone();
+    let metadata = resolve_provider_metadata(&model, Some(&provider))?;
+    if metadata.provider != ProviderKind::Anthropic {
+        return Err(format!(
+            "`claw logout` only clears saved Anthropic OAuth credentials. Active provider: {}.",
+            metadata.display_name
+        )
+        .into());
+    }
     clear_oauth_credentials()?;
     match output_format {
-        CliOutputFormat::Text => println!("Claude OAuth credentials cleared."),
+        CliOutputFormat::Text => println!("Anthropic OAuth credentials cleared."),
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "logout",
-                "message": "Claude OAuth credentials cleared.",
+                "provider": provider_json_value(&model, &provider),
+                "message": "Anthropic OAuth credentials cleared.",
             }))?
         ),
     }
@@ -1460,9 +1680,9 @@ fn wait_for_oauth_callback(
     let callback = parse_oauth_callback_request_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let body = if callback.error.is_some() {
-        "Claude OAuth login failed. You can close this window."
+        "Anthropic OAuth login failed. You can close this window."
     } else {
-        "Claude OAuth login succeeded. You can close this window."
+        "Anthropic OAuth login succeeded. You can close this window."
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -1572,8 +1792,13 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                         let tracker = UsageTracker::from_session(&session);
                         let usage = tracker.cumulative_usage();
                         let context = status_context(Some(&resolved_path)).expect("status context");
+                        let resolved_model = configured_model_for_current_dir()
+                            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+                        let resolved_provider = configured_provider_for_current_dir();
                         let value = json!({
                             "kind": "status",
+                            "model": resolved_model,
+                            "provider": provider_json_value(&resolved_model, &resolved_provider),
                             "messages": session.messages.len(),
                             "turns": tracker.turns(),
                             "latest_total": tracker.current_turn_usage().total_tokens(),
@@ -1992,6 +2217,7 @@ fn run_resume_command(
                 session: session.clone(),
                 message: Some(format_status_report(
                     "restored-session",
+                    &configured_provider_for_current_dir(),
                     StatusUsage {
                         message_count: session.messages.len(),
                         turns: tracker.turns(),
@@ -2145,10 +2371,11 @@ fn run_resume_command(
 
 fn run_repl(
     model: String,
+    provider: RuntimeProviderConfig,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
+    let mut cli = LiveCli::new(model, provider, true, allowed_tools, permission_mode)?;
     let mut editor =
         input::LineEditor::new("> ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
@@ -2210,6 +2437,7 @@ struct ManagedSessionSummary {
 
 struct LiveCli {
     model: String,
+    provider: RuntimeProviderConfig,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     system_prompt: Vec<String>,
@@ -2232,7 +2460,7 @@ struct RuntimeMcpState {
 }
 
 struct BuiltRuntime {
-    runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
+    runtime: Option<ConversationRuntime<ConfiguredRuntimeClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
     plugins_active: bool,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -2241,7 +2469,7 @@ struct BuiltRuntime {
 
 impl BuiltRuntime {
     fn new(
-        runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
+        runtime: ConversationRuntime<ConfiguredRuntimeClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
@@ -2286,7 +2514,7 @@ impl BuiltRuntime {
 }
 
 impl Deref for BuiltRuntime {
-    type Target = ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>;
+    type Target = ConversationRuntime<ConfiguredRuntimeClient, CliToolExecutor>;
 
     fn deref(&self) -> &Self::Target {
         self.runtime
@@ -2691,6 +2919,7 @@ impl HookAbortMonitor {
 impl LiveCli {
     fn new(
         model: String,
+        provider: RuntimeProviderConfig,
         enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
@@ -2702,6 +2931,7 @@ impl LiveCli {
             session_state.with_persistence_path(session.path.clone()),
             &session.id,
             model.clone(),
+            provider.clone(),
             system_prompt.clone(),
             enable_tools,
             true,
@@ -2711,6 +2941,7 @@ impl LiveCli {
         )?;
         let cli = Self {
             model,
+            provider,
             allowed_tools,
             permission_mode,
             system_prompt,
@@ -2748,6 +2979,7 @@ impl LiveCli {
 ╚██████╗███████╗██║  ██║╚███╔███╔╝\n\
  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝\x1b[0m \x1b[38;5;208mCode\x1b[0m 🦞\n\n\
   \x1b[2mModel\x1b[0m            {}\n\
+  \x1b[2mProvider\x1b[0m         {}\n\
   \x1b[2mPermissions\x1b[0m      {}\n\
   \x1b[2mBranch\x1b[0m           {}\n\
   \x1b[2mWorkspace\x1b[0m        {}\n\
@@ -2756,6 +2988,7 @@ impl LiveCli {
   \x1b[2mAuto-save\x1b[0m        {}\n\n\
   Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for workflow completions · \x1b[2mShift+Enter\x1b[0m for newline",
             self.model,
+            provider_display_name(&self.model, &self.provider),
             self.permission_mode.as_str(),
             git_branch,
             workspace,
@@ -2785,6 +3018,7 @@ impl LiveCli {
             self.runtime.session().clone(),
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             emit_output,
@@ -2870,6 +3104,7 @@ impl LiveCli {
             json!({
                 "message": final_assistant_text(&summary),
                 "model": self.model,
+                "provider": provider_json_value(&self.model, &self.provider),
                 "iterations": summary.iterations,
                 "auto_compaction": summary.auto_compaction.map(|event| json!({
                     "removed_messages": event.removed_message_count,
@@ -2884,12 +3119,14 @@ impl LiveCli {
                     "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
                     "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
                 },
-                "estimated_cost": format_usd(
-                    summary.usage.estimate_cost_usd_with_pricing(
-                        pricing_for_model(&self.model)
-                            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
-                    ).total_cost_usd()
-                )
+                "estimated_cost": summary
+                    .usage
+                    .estimate_cost_usd_for_known_model(&self.model)
+                    .map(|cost| format_usd(cost.total_cost_usd())),
+                "pricing_available": summary
+                    .usage
+                    .estimate_cost_usd_for_known_model(&self.model)
+                    .is_some(),
             })
         );
         Ok(())
@@ -3066,6 +3303,7 @@ impl LiveCli {
             "{}",
             format_status_report(
                 &self.model,
+                &self.provider,
                 StatusUsage {
                     message_count: self.runtime.session().messages.len(),
                     turns: self.runtime.usage().turns(),
@@ -3125,6 +3363,7 @@ impl LiveCli {
             session,
             &self.session.id,
             model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3171,6 +3410,7 @@ impl LiveCli {
             session,
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3201,6 +3441,7 @@ impl LiveCli {
             session_state.with_persistence_path(self.session.path.clone()),
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3243,6 +3484,7 @@ impl LiveCli {
             session,
             &handle.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3372,6 +3614,7 @@ impl LiveCli {
                     session,
                     &handle.id,
                     self.model.clone(),
+                    self.provider.clone(),
                     self.system_prompt.clone(),
                     true,
                     true,
@@ -3407,6 +3650,7 @@ impl LiveCli {
                     forked,
                     &handle.id,
                     self.model.clone(),
+                    self.provider.clone(),
                     self.system_prompt.clone(),
                     true,
                     true,
@@ -3457,6 +3701,7 @@ impl LiveCli {
             self.runtime.session().clone(),
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3477,6 +3722,7 @@ impl LiveCli {
             result.compacted_session,
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             true,
             true,
@@ -3501,6 +3747,7 @@ impl LiveCli {
             session,
             &self.session.id,
             self.model.clone(),
+            self.provider.clone(),
             self.system_prompt.clone(),
             enable_tools,
             false,
@@ -3827,6 +4074,7 @@ fn render_repl_help() -> String {
 
 fn print_status_snapshot(
     model: &str,
+    provider: &RuntimeProviderConfig,
     permission_mode: PermissionMode,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3841,13 +4089,14 @@ fn print_status_snapshot(
     match output_format {
         CliOutputFormat::Text => println!(
             "{}",
-            format_status_report(model, usage, permission_mode.as_str(), &context)
+            format_status_report(model, provider, usage, permission_mode.as_str(), &context)
         ),
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "kind": "status",
                 "model": model,
+                "provider": provider_json_value(model, provider),
                 "permission_mode": permission_mode.as_str(),
                 "usage": {
                     "messages": usage.message_count,
@@ -3920,14 +4169,20 @@ fn status_context(
 
 fn format_status_report(
     model: &str,
+    provider: &RuntimeProviderConfig,
     usage: StatusUsage,
     permission_mode: &str,
     context: &StatusContext,
 ) -> String {
+    let provider_name = provider_display_name(model, provider);
+    let provider_base_url =
+        provider_base_url(model, provider).unwrap_or_else(|| "<default>".to_string());
     [
         format!(
             "Status
   Model            {model}
+  Provider         {provider_name}
+  Provider base    {provider_base_url}
   Permission mode  {permission_mode}
   Messages         {}
   Turns            {}
@@ -4155,16 +4410,32 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
 
     if let Some(section) = section {
         lines.push(format!("Merged section: {section}"));
-        let value = match section {
-            "env" => runtime_config.get("env"),
-            "hooks" => runtime_config.get("hooks"),
-            "model" => runtime_config.get("model"),
+        let rendered = match section {
+            "env" => runtime_config
+                .get("env")
+                .map_or_else(|| "<unset>".to_string(), |value| value.render()),
+            "hooks" => runtime_config
+                .get("hooks")
+                .map_or_else(|| "<unset>".to_string(), |value| value.render()),
+            "model" => runtime_config
+                .model()
+                .map_or_else(|| "<unset>".to_string(), ToOwned::to_owned),
+            "provider" => json!({
+                "id": runtime_config.provider().id(),
+                "displayName": provider_display_name(
+                    runtime_config.model().unwrap_or(DEFAULT_MODEL),
+                    runtime_config.provider()
+                ),
+                "baseUrl": runtime_config.provider().base_url(),
+            })
+            .to_string(),
             "plugins" => runtime_config
                 .get("plugins")
-                .or_else(|| runtime_config.get("enabledPlugins")),
+                .or_else(|| runtime_config.get("enabledPlugins"))
+                .map_or_else(|| "<unset>".to_string(), |value| value.render()),
             other => {
                 lines.push(format!(
-                    "  Unsupported config section '{other}'. Use env, hooks, model, or plugins."
+                    "  Unsupported config section '{other}'. Use env, hooks, model, provider, or plugins."
                 ));
                 return Ok(lines.join(
                     "
@@ -4172,13 +4443,7 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
                 ));
             }
         };
-        lines.push(format!(
-            "  {}",
-            match value {
-                Some(value) => value.render(),
-                None => "<unset>".to_string(),
-            }
-        ));
+        lines.push(format!("  {rendered}"));
         return Ok(lines.join(
             "
 ",
@@ -5073,6 +5338,7 @@ fn build_runtime(
     session: Session,
     session_id: &str,
     model: String,
+    provider: RuntimeProviderConfig,
     system_prompt: Vec<String>,
     enable_tools: bool,
     emit_output: bool,
@@ -5085,6 +5351,7 @@ fn build_runtime(
         session,
         session_id,
         model,
+        provider,
         system_prompt,
         enable_tools,
         emit_output,
@@ -5101,6 +5368,7 @@ fn build_runtime_with_plugin_state(
     session: Session,
     session_id: &str,
     model: String,
+    provider: RuntimeProviderConfig,
     system_prompt: Vec<String>,
     enable_tools: bool,
     emit_output: bool,
@@ -5115,14 +5383,19 @@ fn build_runtime_with_plugin_state(
         plugin_registry,
         mcp_state,
     } = runtime_plugin_state;
+    let effective_provider = feature_config.provider().merged_with(&provider);
+    set_active_provider_override(
+        (!effective_provider.is_empty()).then_some(effective_provider.clone()),
+    );
     plugin_registry.initialize()?;
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
     let mut runtime = ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(
+        ConfiguredRuntimeClient::new(
             session_id,
             model,
+            effective_provider,
             enable_tools,
             emit_output,
             allowed_tools.clone(),
@@ -5227,9 +5500,9 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
     }
 }
 
-struct AnthropicRuntimeClient {
+struct ConfiguredRuntimeClient {
     runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
+    client: ProviderClient,
     model: String,
     enable_tools: bool,
     emit_output: bool,
@@ -5238,21 +5511,29 @@ struct AnthropicRuntimeClient {
     progress_reporter: Option<InternalPromptProgressReporter>,
 }
 
-impl AnthropicRuntimeClient {
+impl ConfiguredRuntimeClient {
     fn new(
         session_id: &str,
         model: String,
+        provider: RuntimeProviderConfig,
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let metadata = resolve_provider_metadata(&model, Some(&provider))?;
+        let anthropic_auth = (metadata.provider == ProviderKind::Anthropic)
+            .then(resolve_claude_auth_source)
+            .transpose()?;
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
-            client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url())
-                .with_prompt_cache(PromptCache::new(session_id)),
+            client: ProviderClient::from_model_with_provider_config_and_auth(
+                &model,
+                Some(&provider),
+                anthropic_auth,
+            )?
+            .with_prompt_cache(PromptCache::new(session_id)),
             model,
             enable_tools,
             emit_output,
@@ -5263,7 +5544,7 @@ impl AnthropicRuntimeClient {
     }
 }
 
-fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
+fn resolve_claude_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
     Ok(resolve_startup_auth_source(|| {
         let cwd = env::current_dir().map_err(api::ApiError::from)?;
         let config = ConfigLoader::default_for(&cwd).load().map_err(|error| {
@@ -5273,7 +5554,7 @@ fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
     })?)
 }
 
-impl ApiClient for AnthropicRuntimeClient {
+impl ApiClient for ConfiguredRuntimeClient {
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         if let Some(progress_reporter) = &self.progress_reporter {
@@ -5307,7 +5588,8 @@ impl ApiClient for AnthropicRuntimeClient {
             let renderer = TerminalRenderer::new();
             let mut markdown_stream = MarkdownStreamState::default();
             let mut events = Vec::new();
-            let mut pending_tool: Option<(String, String, String)> = None;
+            let mut pending_tools: std::collections::BTreeMap<u32, (String, String, String)> =
+                std::collections::BTreeMap::new();
             let mut saw_stop = false;
 
             while let Some(event) = stream
@@ -5317,16 +5599,24 @@ impl ApiClient for AnthropicRuntimeClient {
             {
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
-                            push_output_block(block, out, &mut events, &mut pending_tool, true)?;
+                        for (index, block) in start.message.content.into_iter().enumerate() {
+                            push_output_block_indexed(
+                                block,
+                                index as u32,
+                                out,
+                                &mut events,
+                                &mut pending_tools,
+                                true,
+                            )?;
                         }
                     }
                     ApiStreamEvent::ContentBlockStart(start) => {
-                        push_output_block(
+                        push_output_block_indexed(
                             start.content_block,
+                            start.index,
                             out,
                             &mut events,
-                            &mut pending_tool,
+                            &mut pending_tools,
                             true,
                         )?;
                     }
@@ -5345,24 +5635,23 @@ impl ApiClient for AnthropicRuntimeClient {
                             }
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = &mut pending_tool {
+                            if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
                                 input.push_str(&partial_json);
                             }
                         }
                         ContentBlockDelta::ThinkingDelta { .. }
                         | ContentBlockDelta::SignatureDelta { .. } => {}
                     },
-                    ApiStreamEvent::ContentBlockStop(_) => {
+                    ApiStreamEvent::ContentBlockStop(stop) => {
                         if let Some(rendered) = markdown_stream.flush(&renderer) {
                             write!(out, "{rendered}")
                                 .and_then(|()| out.flush())
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
                         }
-                        if let Some((id, name, input)) = pending_tool.take() {
+                        if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_tool_phase(&name, &input);
                             }
-                            // Display tool call now that input is fully accumulated
                             writeln!(out, "\n{}", format_tool_call_start(&name, &input))
                                 .and_then(|()| out.flush())
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -5510,6 +5799,7 @@ fn slash_command_completion_candidates_with_sessions(
         "/config env",
         "/config hooks",
         "/config model",
+        "/config provider",
         "/config plugins",
         "/mcp ",
         "/mcp list",
@@ -6000,6 +6290,40 @@ fn truncate_output_for_display(content: &str, max_lines: usize, max_chars: usize
     preview
 }
 
+fn push_output_block_indexed(
+    block: OutputContentBlock,
+    index: u32,
+    out: &mut (impl Write + ?Sized),
+    events: &mut Vec<AssistantEvent>,
+    pending_tools: &mut std::collections::BTreeMap<u32, (String, String, String)>,
+    streaming_tool_input: bool,
+) -> Result<(), RuntimeError> {
+    match block {
+        OutputContentBlock::Text { text } => {
+            if !text.is_empty() {
+                let rendered = TerminalRenderer::new().markdown_to_ansi(&text);
+                write!(out, "{rendered}")
+                    .and_then(|()| out.flush())
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                events.push(AssistantEvent::TextDelta(text));
+            }
+        }
+        OutputContentBlock::ToolUse { id, name, input } => {
+            let initial_input = if streaming_tool_input
+                && input.is_object()
+                && input.as_object().is_some_and(serde_json::Map::is_empty)
+            {
+                String::new()
+            } else {
+                input.to_string()
+            };
+            pending_tools.insert(index, (id, name, initial_input));
+        }
+        OutputContentBlock::Thinking { .. } | OutputContentBlock::RedactedThinking { .. } => {}
+    }
+    Ok(())
+}
+
 fn push_output_block(
     block: OutputContentBlock,
     out: &mut (impl Write + ?Sized),
@@ -6055,7 +6379,7 @@ fn response_to_events(
     Ok(events)
 }
 
-fn push_prompt_cache_record(client: &AnthropicClient, events: &mut Vec<AssistantEvent>) {
+fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantEvent>) {
     if let Some(record) = client.take_last_prompt_cache_record() {
         if let Some(event) = prompt_cache_record_to_runtime_event(record) {
             events.push(AssistantEvent::PromptCache(event));
@@ -6267,17 +6591,17 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "Usage:")?;
     writeln!(
         out,
-        "  claw [--model MODEL] [--allowedTools TOOL[,TOOL...]]"
+        "  claw [--model MODEL] [--provider PROVIDER] [--allowedTools TOOL[,TOOL...]]"
     )?;
     writeln!(out, "      Start the interactive REPL")?;
     writeln!(
         out,
-        "  claw [--model MODEL] [--output-format text|json] prompt TEXT"
+        "  claw [--model MODEL] [--provider PROVIDER] [--output-format text|json] prompt TEXT"
     )?;
     writeln!(out, "      Send one prompt and exit")?;
     writeln!(
         out,
-        "  claw [--model MODEL] [--output-format text|json] TEXT"
+        "  claw [--model MODEL] [--provider PROVIDER] [--output-format text|json] TEXT"
     )?;
     writeln!(out, "      Shorthand non-interactive prompt mode")?;
     writeln!(
@@ -6318,6 +6642,14 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(
         out,
         "  --model MODEL              Override the active model"
+    )?;
+    writeln!(
+        out,
+        "  --provider PROVIDER        Select anthropic, openai, xai, gemini, ollama, or a compat preset"
+    )?;
+    writeln!(
+        out,
+        "  --provider-base-url URL    Override the provider base URL"
     )?;
     writeln!(
         out,
@@ -6365,6 +6697,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(out, "Examples:")?;
     writeln!(out, "  claw --model claude-opus \"summarize this repo\"")?;
+    writeln!(
+        out,
+        "  claw --provider ollama --model claude-sonnet-4-6 \"review the latest diff\""
+    )?;
     writeln!(
         out,
         "  claw --output-format json prompt \"explain src/main.rs\""
@@ -6432,7 +6768,7 @@ mod tests {
     };
     use runtime::{
         AssistantEvent, ConfigLoader, ContentBlock, ConversationMessage, MessageRole,
-        PermissionMode, Session, ToolExecutor,
+        PermissionMode, RuntimeProviderConfig, Session, ToolExecutor,
     };
     use serde_json::json;
     use std::fs;
@@ -6508,37 +6844,95 @@ mod tests {
         }
     }
 
+    fn available_python_launcher() -> Option<(&'static str, Vec<&'static str>)> {
+        let candidates: &[(&str, &[&str])] = if cfg!(windows) {
+            &[("py", &["-3"]), ("python", &[]), ("python3", &[])]
+        } else {
+            &[("python3", &[]), ("python", &[])]
+        };
+        candidates.iter().find_map(|(command, prefix_args)| {
+            let mut version_args = prefix_args.to_vec();
+            version_args.push("--version");
+            Command::new(command)
+                .args(&version_args)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|_| (*command, prefix_args.to_vec()))
+        })
+    }
+
+    fn remove_dir_all_with_retry(path: &Path, context: &str) {
+        for attempt in 0..10 {
+            match fs::remove_dir_all(path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) if error.raw_os_error() == Some(32) && attempt < 9 => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("{context}: {error:?}"),
+            }
+        }
+    }
+
     fn write_plugin_fixture(root: &Path, name: &str, include_hooks: bool, include_lifecycle: bool) {
         fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
+        let hook_script = if cfg!(windows) { "pre.cmd" } else { "pre.sh" };
+        let init_script = if cfg!(windows) { "init.cmd" } else { "init.sh" };
+        let shutdown_script = if cfg!(windows) {
+            "shutdown.cmd"
+        } else {
+            "shutdown.sh"
+        };
         if include_hooks {
             fs::create_dir_all(root.join("hooks")).expect("hooks dir");
             fs::write(
-                root.join("hooks").join("pre.sh"),
-                "#!/bin/sh\nprintf 'plugin pre hook'\n",
+                root.join("hooks").join(hook_script),
+                if cfg!(windows) {
+                    "@echo off\r\necho plugin pre hook\r\n"
+                } else {
+                    "#!/bin/sh\nprintf 'plugin pre hook'\n"
+                },
             )
             .expect("write hook");
         }
         if include_lifecycle {
             fs::create_dir_all(root.join("lifecycle")).expect("lifecycle dir");
             fs::write(
-                root.join("lifecycle").join("init.sh"),
-                "#!/bin/sh\nprintf 'init\\n' >> lifecycle.log\n",
+                root.join("lifecycle").join(init_script),
+                if cfg!(windows) {
+                    "@echo off\r\necho init>> lifecycle.log\r\n"
+                } else {
+                    "#!/bin/sh\nprintf 'init\\n' >> lifecycle.log\n"
+                },
             )
             .expect("write init lifecycle");
             fs::write(
-                root.join("lifecycle").join("shutdown.sh"),
-                "#!/bin/sh\nprintf 'shutdown\\n' >> lifecycle.log\n",
+                root.join("lifecycle").join(shutdown_script),
+                if cfg!(windows) {
+                    "@echo off\r\necho shutdown>> lifecycle.log\r\n"
+                } else {
+                    "#!/bin/sh\nprintf 'shutdown\\n' >> lifecycle.log\n"
+                },
             )
             .expect("write shutdown lifecycle");
         }
 
         let hooks = if include_hooks {
-            ",\n  \"hooks\": {\n    \"PreToolUse\": [\"./hooks/pre.sh\"]\n  }"
+            if cfg!(windows) {
+                ",\n  \"hooks\": {\n    \"PreToolUse\": [\"./hooks/pre.cmd\"]\n  }"
+            } else {
+                ",\n  \"hooks\": {\n    \"PreToolUse\": [\"./hooks/pre.sh\"]\n  }"
+            }
         } else {
             ""
         };
         let lifecycle = if include_lifecycle {
-            ",\n  \"lifecycle\": {\n    \"Init\": [\"./lifecycle/init.sh\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.sh\"]\n  }"
+            if cfg!(windows) {
+                ",\n  \"lifecycle\": {\n    \"Init\": [\"./lifecycle/init.cmd\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.cmd\"]\n  }"
+            } else {
+                ",\n  \"lifecycle\": {\n    \"Init\": [\"./lifecycle/init.sh\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.sh\"]\n  }"
+            }
         } else {
             ""
         };
@@ -6558,6 +6952,7 @@ mod tests {
             parse_args(&[]).expect("args should parse"),
             CliAction::Repl {
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
             }
@@ -6646,6 +7041,7 @@ mod tests {
             CliAction::Prompt {
                 prompt: "hello world".to_string(),
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -6669,6 +7065,7 @@ mod tests {
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
                 model: "claude-opus".to_string(),
+                provider: RuntimeProviderConfig::default(),
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -6691,6 +7088,7 @@ mod tests {
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
                 model: "claude-opus-4-6".to_string(),
+                provider: RuntimeProviderConfig::default(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -6729,8 +7127,34 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::ReadOnly,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_provider_flags() {
+        let _guard = env_lock();
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        let args = vec![
+            "--provider".to_string(),
+            "ollama".to_string(),
+            "--provider-base-url=http://localhost:11434".to_string(),
+            "hello".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).expect("args should parse"),
+            CliAction::Prompt {
+                prompt: "hello".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default()
+                    .with_id(Some("ollama".to_string()))
+                    .with_base_url(Some("http://localhost:11434".to_string())),
+                output_format: CliOutputFormat::Text,
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -6748,6 +7172,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 allowed_tools: Some(
                     ["glob_search", "read_file", "write_file"]
                         .into_iter()
@@ -6881,6 +7306,7 @@ mod tests {
             parse_args(&["status".to_string()]).expect("status should parse"),
             CliAction::Status {
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 permission_mode: PermissionMode::DangerFullAccess,
                 output_format: CliOutputFormat::Text,
             }
@@ -6934,6 +7360,7 @@ mod tests {
             CliAction::Prompt {
                 prompt: "help me debug".to_string(),
                 model: DEFAULT_MODEL.to_string(),
+                provider: RuntimeProviderConfig::default(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -7185,7 +7612,7 @@ mod tests {
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
-        assert!(help.contains("/config [env|hooks|model|plugins]"));
+        assert!(help.contains("/config [env|hooks|model|provider|plugins]"));
         assert!(help.contains("/mcp [list|show <server>|help]"));
         assert!(help.contains("/memory"));
         assert!(help.contains("/init"));
@@ -7232,6 +7659,7 @@ mod tests {
         let banner = with_current_dir(&root, || {
             LiveCli::new(
                 "claude-sonnet-4-6".to_string(),
+                RuntimeProviderConfig::default(),
                 true,
                 None,
                 PermissionMode::DangerFullAccess,
@@ -7242,6 +7670,7 @@ mod tests {
 
         assert!(banner.contains("Tab"));
         assert!(banner.contains("workflow completions"));
+        assert!(banner.contains("Provider"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
         std::env::remove_var("ANTHROPIC_API_KEY");
@@ -7335,6 +7764,8 @@ mod tests {
         assert!(help.contains("claw mcp"));
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
+        assert!(help.contains("--provider PROVIDER"));
+        assert!(help.contains("--provider-base-url URL"));
     }
 
     #[test]
@@ -7359,6 +7790,7 @@ mod tests {
     fn status_line_reports_model_and_token_totals() {
         let status = format_status_report(
             "claude-sonnet",
+            &RuntimeProviderConfig::default(),
             StatusUsage {
                 message_count: 7,
                 turns: 3,
@@ -7397,6 +7829,7 @@ mod tests {
         );
         assert!(status.contains("Status"));
         assert!(status.contains("Model            claude-sonnet"));
+        assert!(status.contains("Provider         Anthropic"));
         assert!(status.contains("Permission mode  workspace-write"));
         assert!(status.contains("Messages         7"));
         assert!(status.contains("Latest total     10"));
@@ -7736,73 +8169,67 @@ UU conflicted.rs",
 
     #[test]
     fn managed_sessions_default_to_jsonl_and_resolve_legacy_json() {
-        let _guard = cwd_lock().lock().expect("cwd lock");
         let workspace = temp_workspace("session-resolution");
         std::fs::create_dir_all(&workspace).expect("workspace should create");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&workspace).expect("switch cwd");
+        with_current_dir(&workspace, || {
+            let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
+            assert!(handle.path.ends_with("session-alpha.jsonl"));
 
-        let handle = create_managed_session_handle("session-alpha").expect("jsonl handle");
-        assert!(handle.path.ends_with("session-alpha.jsonl"));
+            let legacy_path = workspace.join(".claw/sessions/legacy.json");
+            std::fs::create_dir_all(
+                legacy_path
+                    .parent()
+                    .expect("legacy path should have parent directory"),
+            )
+            .expect("session dir should exist");
+            Session::new()
+                .with_persistence_path(legacy_path.clone())
+                .save_to_path(&legacy_path)
+                .expect("legacy session should save");
 
-        let legacy_path = workspace.join(".claw/sessions/legacy.json");
-        std::fs::create_dir_all(
-            legacy_path
-                .parent()
-                .expect("legacy path should have parent directory"),
-        )
-        .expect("session dir should exist");
-        Session::new()
-            .with_persistence_path(legacy_path.clone())
-            .save_to_path(&legacy_path)
-            .expect("legacy session should save");
-
-        let resolved = resolve_session_reference("legacy").expect("legacy session should resolve");
-        assert_eq!(
-            resolved
-                .path
-                .canonicalize()
-                .expect("resolved path should exist"),
-            legacy_path
-                .canonicalize()
-                .expect("legacy path should exist")
-        );
-
-        std::env::set_current_dir(previous).expect("restore cwd");
-        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+            let resolved =
+                resolve_session_reference("legacy").expect("legacy session should resolve");
+            assert_eq!(
+                resolved
+                    .path
+                    .canonicalize()
+                    .expect("resolved path should exist"),
+                legacy_path
+                    .canonicalize()
+                    .expect("legacy path should exist")
+            );
+        });
+        remove_dir_all_with_retry(&workspace, "workspace should clean up");
     }
 
     #[test]
     fn latest_session_alias_resolves_most_recent_managed_session() {
-        let _guard = cwd_lock().lock().expect("cwd lock");
         let workspace = temp_workspace("latest-session-alias");
         std::fs::create_dir_all(&workspace).expect("workspace should create");
-        let previous = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&workspace).expect("switch cwd");
+        with_current_dir(&workspace, || {
+            let older = create_managed_session_handle("session-older").expect("older handle");
+            Session::new()
+                .with_persistence_path(older.path.clone())
+                .save_to_path(&older.path)
+                .expect("older session should save");
+            std::thread::sleep(Duration::from_millis(20));
+            let newer = create_managed_session_handle("session-newer").expect("newer handle");
+            Session::new()
+                .with_persistence_path(newer.path.clone())
+                .save_to_path(&newer.path)
+                .expect("newer session should save");
 
-        let older = create_managed_session_handle("session-older").expect("older handle");
-        Session::new()
-            .with_persistence_path(older.path.clone())
-            .save_to_path(&older.path)
-            .expect("older session should save");
-        std::thread::sleep(Duration::from_millis(20));
-        let newer = create_managed_session_handle("session-newer").expect("newer handle");
-        Session::new()
-            .with_persistence_path(newer.path.clone())
-            .save_to_path(&newer.path)
-            .expect("newer session should save");
-
-        let resolved = resolve_session_reference("latest").expect("latest session should resolve");
-        assert_eq!(
-            resolved
-                .path
-                .canonicalize()
-                .expect("resolved path should exist"),
-            newer.path.canonicalize().expect("newer path should exist")
-        );
-
-        std::env::set_current_dir(previous).expect("restore cwd");
-        std::fs::remove_dir_all(workspace).expect("workspace should clean up");
+            let resolved =
+                resolve_session_reference("latest").expect("latest session should resolve");
+            assert_eq!(
+                resolved
+                    .path
+                    .canonicalize()
+                    .expect("resolved path should exist"),
+                newer.path.canonicalize().expect("newer path should exist")
+            );
+        });
+        remove_dir_all_with_retry(&workspace, "workspace should clean up");
     }
 
     #[test]
@@ -8222,7 +8649,7 @@ UU conflicted.rs",
         let pre_hooks = state.feature_config.hooks().pre_tool_use();
         assert_eq!(pre_hooks.len(), 1);
         assert!(
-            pre_hooks[0].ends_with("hooks/pre.sh"),
+            pre_hooks[0].ends_with("hooks/pre.sh") || pre_hooks[0].ends_with("hooks/pre.cmd"),
             "expected installed plugin hook path, got {pre_hooks:?}"
         );
 
@@ -8239,6 +8666,38 @@ UU conflicted.rs",
         fs::create_dir_all(&config_home).expect("config home");
         fs::create_dir_all(&workspace).expect("workspace");
         let script_path = workspace.join("fixture-mcp.py");
+        let Some((python_command, python_prefix_args)) = available_python_launcher() else {
+            eprintln!("skipping MCP discovery test: no usable Python interpreter found");
+            let _ = fs::remove_dir_all(config_home);
+            let _ = fs::remove_dir_all(workspace);
+            return;
+        };
+        let alpha_args = format!(
+            r#""args": {}"#,
+            serde_json::to_string(
+                &python_prefix_args
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .chain(std::iter::once(script_path.to_string_lossy().to_string()))
+                    .collect::<Vec<_>>()
+            )
+            .expect("script path args should serialize")
+        );
+        let broken_args = format!(
+            r#""args": {}"#,
+            serde_json::to_string(
+                &python_prefix_args
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .chain(
+                        ["-c", "import sys; sys.exit(0)"]
+                            .into_iter()
+                            .map(str::to_string)
+                    )
+                    .collect::<Vec<_>>()
+            )
+            .expect("broken args should serialize")
+        );
         write_mcp_server_fixture(&script_path);
         fs::write(
             config_home.join("settings.json"),
@@ -8246,16 +8705,15 @@ UU conflicted.rs",
                 r#"{{
                   "mcpServers": {{
                     "alpha": {{
-                      "command": "python3",
-                      "args": ["{}"]
+                      "command": "{python_command}",
+                      {alpha_args}
                     }},
                     "broken": {{
-                      "command": "python3",
-                      "args": ["-c", "import sys; sys.exit(0)"]
+                      "command": "{python_command}",
+                      {broken_args}
                     }}
                   }}
                 }}"#,
-                script_path.to_string_lossy()
             ),
         )
         .expect("write mcp settings");
@@ -8428,6 +8886,7 @@ UU conflicted.rs",
             Session::new(),
             "runtime-plugin-lifecycle",
             DEFAULT_MODEL.to_string(),
+            RuntimeProviderConfig::default(),
             vec!["test system prompt".to_string()],
             true,
             false,
@@ -8439,7 +8898,9 @@ UU conflicted.rs",
         .expect("runtime should build");
 
         assert_eq!(
-            fs::read_to_string(&log_path).expect("init log should exist"),
+            fs::read_to_string(&log_path)
+                .expect("init log should exist")
+                .replace("\r\n", "\n"),
             "init\n"
         );
 
@@ -8448,7 +8909,9 @@ UU conflicted.rs",
             .expect("plugin shutdown should succeed");
 
         assert_eq!(
-            fs::read_to_string(&log_path).expect("shutdown log should exist"),
+            fs::read_to_string(&log_path)
+                .expect("shutdown log should exist")
+                .replace("\r\n", "\n"),
             "init\nshutdown\n"
         );
 

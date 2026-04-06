@@ -118,7 +118,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "config",
         aliases: &[],
         summary: "Inspect Claude config files or merged sections",
-        argument_hint: Some("[env|hooks|model|plugins]"),
+        argument_hint: Some("[env|hooks|model|provider|plugins]"),
         resume_supported: true,
     },
     SlashCommandSpec {
@@ -1489,15 +1489,20 @@ fn parse_clear_args(args: &[&str]) -> Result<bool, SlashCommandParseError> {
 }
 
 fn parse_config_section(args: &[&str]) -> Result<Option<String>, SlashCommandParseError> {
-    let section = optional_single_arg("config", args, "[env|hooks|model|plugins]")?;
+    let section = optional_single_arg("config", args, "[env|hooks|model|provider|plugins]")?;
     if let Some(section) = section {
-        if matches!(section.as_str(), "env" | "hooks" | "model" | "plugins") {
+        if matches!(
+            section.as_str(),
+            "env" | "hooks" | "model" | "provider" | "plugins"
+        ) {
             return Ok(Some(section));
         }
         return Err(command_error(
-            &format!("Unsupported /config section '{section}'. Use env, hooks, model, or plugins."),
+            &format!(
+                "Unsupported /config section '{section}'. Use env, hooks, model, provider, or plugins."
+            ),
             "config",
-            "/config [env|hooks|model|plugins]",
+            "/config [env|hooks|model|provider|plugins]",
         ));
     }
 
@@ -4096,7 +4101,7 @@ mod tests {
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
-        assert!(help.contains("/config [env|hooks|model|plugins]"));
+        assert!(help.contains("/config [env|hooks|model|provider|plugins]"));
         assert!(help.contains("/mcp [list|show <server>|help]"));
         assert!(help.contains("/memory"));
         assert!(help.contains("/init"));

@@ -4661,7 +4661,17 @@ fn config_home_dir() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("CLAW_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var("HOME").map_err(|_| String::from("HOME is not set"))?;
+    let home = if let Ok(path) = std::env::var("HOME") {
+        path
+    } else if let Ok(path) = std::env::var("USERPROFILE") {
+        path
+    } else if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        format!("{drive}{path}")
+    } else {
+        return Err(String::from(
+            "HOME, USERPROFILE, and HOMEDRIVE/HOMEPATH are not set",
+        ));
+    };
     Ok(PathBuf::from(home).join(".claw"))
 }
 

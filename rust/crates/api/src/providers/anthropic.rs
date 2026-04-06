@@ -36,22 +36,43 @@ pub enum AuthSource {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnthropicEnvConfig {
+    pub provider_name: &'static str,
+    pub api_key_env: &'static str,
+    pub auth_token_env: &'static str,
+    pub credential_env_vars: &'static [&'static str],
+    pub base_url_env: &'static str,
+    pub default_base_url: Option<&'static str>,
+    pub allow_saved_oauth: bool,
+    pub fallback_auth: Option<StaticAuthFallback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticAuthFallback {
+    ApiKey(&'static str),
+    BearerToken(&'static str),
+}
+
+impl AnthropicEnvConfig {
+    #[must_use]
+    pub const fn anthropic() -> Self {
+        Self {
+            provider_name: "Anthropic",
+            api_key_env: "ANTHROPIC_API_KEY",
+            auth_token_env: "ANTHROPIC_AUTH_TOKEN",
+            credential_env_vars: &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            base_url_env: "ANTHROPIC_BASE_URL",
+            default_base_url: Some(DEFAULT_BASE_URL),
+            allow_saved_oauth: true,
+            fallback_auth: None,
+        }
+    }
+}
+
 impl AuthSource {
     pub fn from_env() -> Result<Self, ApiError> {
-        let api_key = read_env_non_empty("ANTHROPIC_API_KEY")?;
-        let auth_token = read_env_non_empty("ANTHROPIC_AUTH_TOKEN")?;
-        match (api_key, auth_token) {
-            (Some(api_key), Some(bearer_token)) => Ok(Self::ApiKeyAndBearer {
-                api_key,
-                bearer_token,
-            }),
-            (Some(api_key), None) => Ok(Self::ApiKey(api_key)),
-            (None, Some(bearer_token)) => Ok(Self::BearerToken(bearer_token)),
-            (None, None) => Err(ApiError::missing_credentials(
-                "Anthropic",
-                &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
-            )),
-        }
+        auth_source_from_config(AnthropicEnvConfig::anthropic())
     }
 
     #[must_use]
@@ -516,36 +537,7 @@ impl AnthropicClient {
 
 impl AuthSource {
     pub fn from_env_or_saved() -> Result<Self, ApiError> {
-        if let Some(api_key) = read_env_non_empty("ANTHROPIC_API_KEY")? {
-            return match read_env_non_empty("ANTHROPIC_AUTH_TOKEN")? {
-                Some(bearer_token) => Ok(Self::ApiKeyAndBearer {
-                    api_key,
-                    bearer_token,
-                }),
-                None => Ok(Self::ApiKey(api_key)),
-            };
-        }
-        if let Some(bearer_token) = read_env_non_empty("ANTHROPIC_AUTH_TOKEN")? {
-            return Ok(Self::BearerToken(bearer_token));
-        }
-        match load_saved_oauth_token() {
-            Ok(Some(token_set)) if oauth_token_is_expired(&token_set) => {
-                if token_set.refresh_token.is_some() {
-                    Err(ApiError::Auth(
-                        "saved OAuth token is expired; load runtime OAuth config to refresh it"
-                            .to_string(),
-                    ))
-                } else {
-                    Err(ApiError::ExpiredOAuthToken)
-                }
-            }
-            Ok(Some(token_set)) => Ok(Self::BearerToken(token_set.access_token)),
-            Ok(None) => Err(ApiError::missing_credentials(
-                "Anthropic",
-                &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
-            )),
-            Err(error) => Err(error),
-        }
+        auth_source_from_config(AnthropicEnvConfig::anthropic())
     }
 }
 
@@ -564,9 +556,7 @@ pub fn resolve_saved_oauth_token(config: &OAuthConfig) -> Result<Option<OAuthTok
 }
 
 pub fn has_auth_from_env_or_saved() -> Result<bool, ApiError> {
-    Ok(read_env_non_empty("ANTHROPIC_API_KEY")?.is_some()
-        || read_env_non_empty("ANTHROPIC_AUTH_TOKEN")?.is_some()
-        || load_saved_oauth_token()?.is_some())
+    has_auth_with_config(AnthropicEnvConfig::anthropic())
 }
 
 pub fn resolve_startup_auth_source<F>(load_oauth_config: F) -> Result<AuthSource, ApiError>
@@ -681,6 +671,60 @@ fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
     }
 }
 
+pub fn has_auth_with_env(api_key_env: &str, auth_token_env: &str) -> Result<bool, ApiError> {
+    Ok(read_env_non_empty(api_key_env)?.is_some() || read_env_non_empty(auth_token_env)?.is_some())
+}
+
+pub fn has_auth_with_config(config: AnthropicEnvConfig) -> Result<bool, ApiError> {
+    Ok(
+        has_auth_with_env(config.api_key_env, config.auth_token_env)?
+            || (config.allow_saved_oauth && load_saved_oauth_token()?.is_some()),
+    )
+}
+
+pub fn auth_source_from_config(config: AnthropicEnvConfig) -> Result<AuthSource, ApiError> {
+    if let Some(api_key) = read_env_non_empty(config.api_key_env)? {
+        return match read_env_non_empty(config.auth_token_env)? {
+            Some(bearer_token) => Ok(AuthSource::ApiKeyAndBearer {
+                api_key,
+                bearer_token,
+            }),
+            None => Ok(AuthSource::ApiKey(api_key)),
+        };
+    }
+    if let Some(bearer_token) = read_env_non_empty(config.auth_token_env)? {
+        return Ok(AuthSource::BearerToken(bearer_token));
+    }
+    if config.allow_saved_oauth {
+        match load_saved_oauth_token() {
+            Ok(Some(token_set)) if oauth_token_is_expired(&token_set) => {
+                if token_set.refresh_token.is_some() {
+                    return Err(ApiError::Auth(
+                        "saved OAuth token is expired; load runtime OAuth config to refresh it"
+                            .to_string(),
+                    ));
+                }
+                return Err(ApiError::ExpiredOAuthToken);
+            }
+            Ok(Some(token_set)) => {
+                return Ok(AuthSource::BearerToken(token_set.access_token));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match config.fallback_auth {
+        Some(StaticAuthFallback::ApiKey(api_key)) => Ok(AuthSource::ApiKey(api_key.to_string())),
+        Some(StaticAuthFallback::BearerToken(token)) => {
+            Ok(AuthSource::BearerToken(token.to_string()))
+        }
+        None => Err(ApiError::missing_credentials(
+            config.provider_name,
+            config.credential_env_vars,
+        )),
+    }
+}
+
 #[cfg(test)]
 fn read_api_key() -> Result<String, ApiError> {
     let auth = AuthSource::from_env_or_saved()?;
@@ -702,7 +746,23 @@ fn read_auth_token() -> Option<String> {
 
 #[must_use]
 pub fn read_base_url() -> String {
-    std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+    read_base_url_with_config(AnthropicEnvConfig::anthropic())
+        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
+
+pub fn read_base_url_with_config(config: AnthropicEnvConfig) -> Result<String, ApiError> {
+    if let Ok(value) = std::env::var(config.base_url_env) {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+    config
+        .default_base_url
+        .map(str::to_string)
+        .ok_or(ApiError::MissingBaseUrl {
+            provider: config.provider_name,
+            env_var: config.base_url_env,
+        })
 }
 
 fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {

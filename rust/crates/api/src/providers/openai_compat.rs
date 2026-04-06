@@ -27,11 +27,15 @@ pub struct OpenAiCompatConfig {
     pub provider_name: &'static str,
     pub api_key_env: &'static str,
     pub base_url_env: &'static str,
-    pub default_base_url: &'static str,
+    pub default_base_url: Option<&'static str>,
+    pub include_stream_usage: bool,
+    pub credential_env_vars: &'static [&'static str],
 }
 
 const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
 const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
+const GEMINI_ENV_VARS: &[&str] = &["GEMINI_API_KEY"];
+const OPENAI_COMPAT_ENV_VARS: &[&str] = &["OPENAI_COMPAT_API_KEY"];
 
 impl OpenAiCompatConfig {
     #[must_use]
@@ -40,7 +44,9 @@ impl OpenAiCompatConfig {
             provider_name: "xAI",
             api_key_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
-            default_base_url: DEFAULT_XAI_BASE_URL,
+            default_base_url: Some(DEFAULT_XAI_BASE_URL),
+            include_stream_usage: false,
+            credential_env_vars: XAI_ENV_VARS,
         }
     }
 
@@ -50,16 +56,39 @@ impl OpenAiCompatConfig {
             provider_name: "OpenAI",
             api_key_env: "OPENAI_API_KEY",
             base_url_env: "OPENAI_BASE_URL",
-            default_base_url: DEFAULT_OPENAI_BASE_URL,
+            default_base_url: Some(DEFAULT_OPENAI_BASE_URL),
+            include_stream_usage: true,
+            credential_env_vars: OPENAI_ENV_VARS,
         }
     }
+
+    #[must_use]
+    pub const fn gemini() -> Self {
+        Self {
+            provider_name: "Gemini",
+            api_key_env: "GEMINI_API_KEY",
+            base_url_env: "GEMINI_BASE_URL",
+            default_base_url: None,
+            include_stream_usage: false,
+            credential_env_vars: GEMINI_ENV_VARS,
+        }
+    }
+
+    #[must_use]
+    pub const fn openai_compatible() -> Self {
+        Self {
+            provider_name: "OpenAI-compatible",
+            api_key_env: "OPENAI_COMPAT_API_KEY",
+            base_url_env: "OPENAI_COMPAT_BASE_URL",
+            default_base_url: None,
+            include_stream_usage: false,
+            credential_env_vars: OPENAI_COMPAT_ENV_VARS,
+        }
+    }
+
     #[must_use]
     pub fn credential_env_vars(self) -> &'static [&'static str] {
-        match self.provider_name {
-            "xAI" => XAI_ENV_VARS,
-            "OpenAI" => OPENAI_ENV_VARS,
-            _ => &[],
-        }
+        self.credential_env_vars
     }
 }
 
@@ -84,7 +113,7 @@ impl OpenAiCompatClient {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
             config,
-            base_url: read_base_url(config),
+            base_url: config.default_base_url.unwrap_or_default().to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
@@ -92,13 +121,7 @@ impl OpenAiCompatClient {
     }
 
     pub fn from_env(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
-        let Some(api_key) = read_env_non_empty(config.api_key_env)? else {
-            return Err(ApiError::missing_credentials(
-                config.provider_name,
-                config.credential_env_vars(),
-            ));
-        };
-        Ok(Self::new(api_key, config))
+        Ok(Self::new(read_api_key(config)?, config).with_base_url(read_base_url(config)?))
     }
 
     #[must_use]
@@ -761,7 +784,7 @@ fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
 }
 
 fn should_request_stream_usage(config: OpenAiCompatConfig) -> bool {
-    matches!(config.provider_name, "OpenAI")
+    config.include_stream_usage
 }
 
 fn normalize_response(
@@ -878,9 +901,29 @@ pub fn has_api_key(key: &str) -> bool {
         .is_some()
 }
 
-#[must_use]
-pub fn read_base_url(config: OpenAiCompatConfig) -> String {
-    std::env::var(config.base_url_env).unwrap_or_else(|_| config.default_base_url.to_string())
+pub fn read_api_key(config: OpenAiCompatConfig) -> Result<String, ApiError> {
+    let Some(api_key) = read_env_non_empty(config.api_key_env)? else {
+        return Err(ApiError::missing_credentials(
+            config.provider_name,
+            config.credential_env_vars(),
+        ));
+    };
+    Ok(api_key)
+}
+
+pub fn read_base_url(config: OpenAiCompatConfig) -> Result<String, ApiError> {
+    if let Ok(value) = std::env::var(config.base_url_env) {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+    config
+        .default_base_url
+        .map(str::to_string)
+        .ok_or(ApiError::MissingBaseUrl {
+            provider: config.provider_name,
+            env_var: config.base_url_env,
+        })
 }
 
 fn chat_completions_endpoint(base_url: &str) -> String {

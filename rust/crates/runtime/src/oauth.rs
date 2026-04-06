@@ -335,7 +335,18 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            Some(format!("{}{}", drive.to_string_lossy(), path.to_string_lossy()).into())
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "HOME, USERPROFILE, and HOMEDRIVE/HOMEPATH are not set",
+            )
+        })?;
     Ok(PathBuf::from(home).join(".claw"))
 }
 

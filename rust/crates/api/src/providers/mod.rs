@@ -2,6 +2,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use runtime::{active_provider_override, RuntimeProviderConfig};
 use serde::Serialize;
 
 use crate::error::ApiError;
@@ -31,16 +32,47 @@ pub trait Provider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Anthropic,
-    Xai,
     OpenAi,
+    Xai,
+    Gemini,
+    OpenAiCompatible,
+    AnthropicCompatible,
+    Ollama,
+}
+
+impl ProviderKind {
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::Xai => "xAI",
+            Self::Gemini => "Gemini",
+            Self::OpenAiCompatible => "OpenAI-compatible",
+            Self::AnthropicCompatible => "Anthropic-compatible",
+            Self::Ollama => "Ollama",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTransport {
+    Anthropic,
+    OpenAiCompat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderMetadata {
+    pub id: &'static str,
+    pub display_name: &'static str,
     pub provider: ProviderKind,
+    pub transport: ProviderTransport,
     pub auth_env: &'static str,
+    pub auth_env_secondary: Option<&'static str>,
     pub base_url_env: &'static str,
-    pub default_base_url: &'static str,
+    pub default_base_url: Option<&'static str>,
+    pub supports_saved_oauth: bool,
+    pub fallback_auth: Option<anthropic::StaticAuthFallback>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,127 +81,262 @@ pub struct ModelTokenLimit {
     pub context_window_tokens: u32,
 }
 
-const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
-    (
-        "opus",
-        ProviderMetadata {
-            provider: ProviderKind::Anthropic,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: anthropic::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "sonnet",
-        ProviderMetadata {
-            provider: ProviderKind::Anthropic,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: anthropic::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "haiku",
-        ProviderMetadata {
-            provider: ProviderKind::Anthropic,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: anthropic::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "grok",
-        ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        },
-    ),
-    (
-        "grok-3",
-        ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        },
-    ),
-    (
-        "grok-mini",
-        ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        },
-    ),
-    (
-        "grok-3-mini",
-        ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        },
-    ),
-    (
-        "grok-2",
-        ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        },
-    ),
+pub const SUPPORTED_PROVIDER_IDS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "xai",
+    "gemini",
+    "openai-compatible",
+    "anthropic-compatible",
+    "ollama",
 ];
+
+const fn anthropic_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "anthropic",
+        display_name: "Anthropic",
+        provider: ProviderKind::Anthropic,
+        transport: ProviderTransport::Anthropic,
+        auth_env: "ANTHROPIC_AUTH_TOKEN",
+        auth_env_secondary: Some("ANTHROPIC_API_KEY"),
+        base_url_env: "ANTHROPIC_BASE_URL",
+        default_base_url: Some(anthropic::DEFAULT_BASE_URL),
+        supports_saved_oauth: true,
+        fallback_auth: None,
+    }
+}
+
+const fn openai_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "openai",
+        display_name: "OpenAI",
+        provider: ProviderKind::OpenAi,
+        transport: ProviderTransport::OpenAiCompat,
+        auth_env: "OPENAI_API_KEY",
+        auth_env_secondary: None,
+        base_url_env: "OPENAI_BASE_URL",
+        default_base_url: Some(openai_compat::DEFAULT_OPENAI_BASE_URL),
+        supports_saved_oauth: false,
+        fallback_auth: None,
+    }
+}
+
+const fn xai_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "xai",
+        display_name: "xAI",
+        provider: ProviderKind::Xai,
+        transport: ProviderTransport::OpenAiCompat,
+        auth_env: "XAI_API_KEY",
+        auth_env_secondary: None,
+        base_url_env: "XAI_BASE_URL",
+        default_base_url: Some(openai_compat::DEFAULT_XAI_BASE_URL),
+        supports_saved_oauth: false,
+        fallback_auth: None,
+    }
+}
+
+const fn gemini_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "gemini",
+        display_name: "Gemini",
+        provider: ProviderKind::Gemini,
+        transport: ProviderTransport::OpenAiCompat,
+        auth_env: "GEMINI_API_KEY",
+        auth_env_secondary: None,
+        base_url_env: "GEMINI_BASE_URL",
+        default_base_url: None,
+        supports_saved_oauth: false,
+        fallback_auth: None,
+    }
+}
+
+const fn openai_compatible_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "openai-compatible",
+        display_name: "OpenAI-compatible",
+        provider: ProviderKind::OpenAiCompatible,
+        transport: ProviderTransport::OpenAiCompat,
+        auth_env: "OPENAI_COMPAT_API_KEY",
+        auth_env_secondary: None,
+        base_url_env: "OPENAI_COMPAT_BASE_URL",
+        default_base_url: None,
+        supports_saved_oauth: false,
+        fallback_auth: None,
+    }
+}
+
+const fn anthropic_compatible_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "anthropic-compatible",
+        display_name: "Anthropic-compatible",
+        provider: ProviderKind::AnthropicCompatible,
+        transport: ProviderTransport::Anthropic,
+        auth_env: "ANTHROPIC_COMPAT_AUTH_TOKEN",
+        auth_env_secondary: Some("ANTHROPIC_COMPAT_API_KEY"),
+        base_url_env: "ANTHROPIC_COMPAT_BASE_URL",
+        default_base_url: None,
+        supports_saved_oauth: false,
+        fallback_auth: None,
+    }
+}
+
+const fn ollama_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        id: "ollama",
+        display_name: "Ollama",
+        provider: ProviderKind::Ollama,
+        transport: ProviderTransport::Anthropic,
+        auth_env: "OLLAMA_AUTH_TOKEN",
+        auth_env_secondary: Some("OLLAMA_API_KEY"),
+        base_url_env: "OLLAMA_BASE_URL",
+        default_base_url: Some("http://localhost:11434"),
+        supports_saved_oauth: false,
+        fallback_auth: Some(anthropic::StaticAuthFallback::BearerToken("ollama")),
+    }
+}
+
+fn effective_provider_config(
+    provider_config: Option<&RuntimeProviderConfig>,
+) -> RuntimeProviderConfig {
+    active_provider_override()
+        .unwrap_or_default()
+        .merged_with(&provider_config.cloned().unwrap_or_default())
+}
 
 #[must_use]
 pub fn resolve_model_alias(model: &str) -> String {
     let trimmed = model.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    MODEL_REGISTRY
-        .iter()
-        .find_map(|(alias, metadata)| {
-            (*alias == lower).then_some(match metadata.provider {
-                ProviderKind::Anthropic => match *alias {
-                    "opus" => "claude-opus-4-6",
-                    "sonnet" => "claude-sonnet-4-6",
-                    "haiku" => "claude-haiku-4-5-20251213",
-                    _ => trimmed,
-                },
-                ProviderKind::Xai => match *alias {
-                    "grok" | "grok-3" => "grok-3",
-                    "grok-mini" | "grok-3-mini" => "grok-3-mini",
-                    "grok-2" => "grok-2",
-                    _ => trimmed,
-                },
-                ProviderKind::OpenAi => trimmed,
-            })
-        })
-        .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
+    match trimmed.to_ascii_lowercase().as_str() {
+        "opus" => "claude-opus-4-6".to_string(),
+        "sonnet" => "claude-sonnet-4-6".to_string(),
+        "haiku" => "claude-haiku-4-5-20251213".to_string(),
+        "grok" | "grok-3" => "grok-3".to_string(),
+        "grok-mini" | "grok-3-mini" => "grok-3-mini".to_string(),
+        "grok-2" => "grok-2".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+#[must_use]
+pub fn provider_metadata_by_id(provider_id: &str) -> Option<ProviderMetadata> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" => Some(anthropic_metadata()),
+        "openai" | "chatgpt" => Some(openai_metadata()),
+        "xai" | "grok" => Some(xai_metadata()),
+        "gemini" | "google" => Some(gemini_metadata()),
+        "openai-compatible" | "openai_compat" | "openai-compat" => {
+            Some(openai_compatible_metadata())
+        }
+        "anthropic-compatible" | "anthropic_compat" | "anthropic-compat" => {
+            Some(anthropic_compatible_metadata())
+        }
+        "ollama" => Some(ollama_metadata()),
+        _ => None,
+    }
 }
 
 #[must_use]
 pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
-    let canonical = resolve_model_alias(model);
+    let canonical = resolve_model_alias(model).to_ascii_lowercase();
     if canonical.starts_with("claude") {
-        return Some(ProviderMetadata {
-            provider: ProviderKind::Anthropic,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: anthropic::DEFAULT_BASE_URL,
-        });
+        return Some(anthropic_metadata());
     }
     if canonical.starts_with("grok") {
-        return Some(ProviderMetadata {
-            provider: ProviderKind::Xai,
-            auth_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
-        });
+        return Some(xai_metadata());
+    }
+    if canonical.starts_with("gemini") {
+        return Some(gemini_metadata());
+    }
+    if canonical.starts_with("gpt")
+        || canonical.starts_with("chatgpt")
+        || canonical.starts_with("o1")
+        || canonical.starts_with("o3")
+        || canonical.starts_with("o4")
+    {
+        return Some(openai_metadata());
     }
     None
+}
+
+pub fn resolve_provider_metadata(
+    model: &str,
+    provider_config: Option<&RuntimeProviderConfig>,
+) -> Result<ProviderMetadata, ApiError> {
+    let effective = effective_provider_config(provider_config);
+    if let Some(provider_id) = effective.id() {
+        return provider_metadata_by_id(provider_id).ok_or(ApiError::UnsupportedProvider {
+            provider: provider_id.to_string(),
+            supported: SUPPORTED_PROVIDER_IDS,
+        });
+    }
+
+    if let Some(metadata) = metadata_for_model(model) {
+        return Ok(metadata);
+    }
+
+    let configured = configured_provider_metadata()?;
+    match configured.as_slice() {
+        [metadata] => Ok(*metadata),
+        [] => Err(ApiError::ProviderSelectionRequired {
+            model: resolve_model_alias(model),
+            supported: SUPPORTED_PROVIDER_IDS,
+        }),
+        many => Err(ApiError::AmbiguousProviderSelection {
+            model: resolve_model_alias(model),
+            configured: many.iter().map(|metadata| metadata.id).collect(),
+        }),
+    }
+}
+
+pub fn base_url_for_provider(
+    metadata: ProviderMetadata,
+    provider_config: Option<&RuntimeProviderConfig>,
+) -> Result<String, ApiError> {
+    let effective = effective_provider_config(provider_config);
+    if let Some(base_url) = effective.base_url() {
+        return Ok(base_url.to_string());
+    }
+    match metadata.transport {
+        ProviderTransport::Anthropic => {
+            anthropic::read_base_url_with_config(anthropic_config_for_metadata(metadata))
+        }
+        ProviderTransport::OpenAiCompat => {
+            openai_compat::read_base_url(openai_compat_config_for_metadata(metadata))
+        }
+    }
+}
+
+#[must_use]
+pub fn anthropic_config_for_metadata(metadata: ProviderMetadata) -> anthropic::AnthropicEnvConfig {
+    anthropic::AnthropicEnvConfig {
+        provider_name: metadata.display_name,
+        api_key_env: metadata.auth_env_secondary.unwrap_or(metadata.auth_env),
+        auth_token_env: metadata.auth_env,
+        credential_env_vars: match metadata.id {
+            "anthropic" => &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            "anthropic-compatible" => &["ANTHROPIC_COMPAT_AUTH_TOKEN", "ANTHROPIC_COMPAT_API_KEY"],
+            "ollama" => &["OLLAMA_AUTH_TOKEN", "OLLAMA_API_KEY"],
+            other => panic!("unsupported anthropic provider metadata: {other}"),
+        },
+        base_url_env: metadata.base_url_env,
+        default_base_url: metadata.default_base_url,
+        allow_saved_oauth: metadata.supports_saved_oauth,
+        fallback_auth: metadata.fallback_auth,
+    }
+}
+
+#[must_use]
+pub fn openai_compat_config_for_metadata(
+    metadata: ProviderMetadata,
+) -> openai_compat::OpenAiCompatConfig {
+    match metadata.id {
+        "openai" => openai_compat::OpenAiCompatConfig::openai(),
+        "xai" => openai_compat::OpenAiCompatConfig::xai(),
+        "gemini" => openai_compat::OpenAiCompatConfig::gemini(),
+        "openai-compatible" => openai_compat::OpenAiCompatConfig::openai_compatible(),
+        other => panic!("unsupported OpenAI-compatible provider metadata: {other}"),
+    }
 }
 
 #[must_use]
@@ -185,6 +352,9 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     }
     if openai_compat::has_api_key("XAI_API_KEY") {
         return ProviderKind::Xai;
+    }
+    if openai_compat::has_api_key("GEMINI_API_KEY") {
+        return ProviderKind::Gemini;
     }
     ProviderKind::Anthropic
 }
@@ -244,6 +414,40 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
     Ok(())
 }
 
+fn configured_provider_metadata() -> Result<Vec<ProviderMetadata>, ApiError> {
+    let mut configured = Vec::new();
+    if anthropic::has_auth_from_env_or_saved()? {
+        configured.push(anthropic_metadata());
+    }
+    if openai_compat::has_api_key("OPENAI_API_KEY") {
+        configured.push(openai_metadata());
+    }
+    if openai_compat::has_api_key("XAI_API_KEY") {
+        configured.push(xai_metadata());
+    }
+    if openai_compat::has_api_key("GEMINI_API_KEY") {
+        configured.push(gemini_metadata());
+    }
+    if openai_compat::has_api_key("OPENAI_COMPAT_API_KEY") {
+        configured.push(openai_compatible_metadata());
+    }
+    if anthropic::has_auth_with_env("ANTHROPIC_COMPAT_API_KEY", "ANTHROPIC_COMPAT_AUTH_TOKEN")? {
+        configured.push(anthropic_compatible_metadata());
+    }
+    if anthropic::has_auth_with_env("OLLAMA_API_KEY", "OLLAMA_AUTH_TOKEN")?
+        || env_var_present("OLLAMA_BASE_URL")
+    {
+        configured.push(ollama_metadata());
+    }
+    Ok(configured)
+}
+
+fn env_var_present(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
     estimate = estimate.saturating_add(estimate_serialized_tokens(&request.system));
@@ -260,6 +464,7 @@ fn estimate_serialized_tokens<T: Serialize>(value: &T) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use runtime::{set_active_provider_override, RuntimeProviderConfig};
     use serde_json::json;
 
     use crate::error::ApiError;
@@ -269,7 +474,7 @@ mod tests {
 
     use super::{
         detect_provider_kind, max_tokens_for_model, model_token_limit, preflight_message_request,
-        resolve_model_alias, ProviderKind,
+        resolve_model_alias, resolve_provider_metadata, ProviderKind,
     };
 
     #[test]
@@ -286,6 +491,27 @@ mod tests {
             detect_provider_kind("claude-sonnet-4-6"),
             ProviderKind::Anthropic
         );
+        assert_eq!(detect_provider_kind("gpt-5"), ProviderKind::OpenAi);
+        assert_eq!(detect_provider_kind("gemini-2.5-pro"), ProviderKind::Gemini);
+    }
+
+    #[test]
+    fn explicit_provider_override_wins_over_model_family() {
+        let config = RuntimeProviderConfig::default().with_id(Some("ollama".to_string()));
+        let metadata =
+            resolve_provider_metadata("claude-sonnet-4-6", Some(&config)).expect("provider");
+        assert_eq!(metadata.id, "ollama");
+    }
+
+    #[test]
+    fn process_provider_override_is_applied() {
+        set_active_provider_override(Some(
+            RuntimeProviderConfig::default().with_id(Some("openai-compatible".to_string())),
+        ));
+        let metadata = resolve_provider_metadata("custom-model", None)
+            .expect("provider override should apply");
+        assert_eq!(metadata.id, "openai-compatible");
+        set_active_provider_override(None);
     }
 
     #[test]
