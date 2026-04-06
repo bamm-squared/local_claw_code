@@ -677,10 +677,15 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
 
     let mut payload = json!({
         "model": request.model,
-        "max_tokens": request.max_tokens,
         "messages": messages,
         "stream": request.stream,
     });
+
+    if uses_max_completion_tokens(&request.model, config) {
+        payload["max_completion_tokens"] = json!(request.max_tokens);
+    } else {
+        payload["max_tokens"] = json!(request.max_tokens);
+    }
 
     if request.stream && should_request_stream_usage(config) {
         payload["stream_options"] = json!({ "include_usage": true });
@@ -695,6 +700,11 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
     }
 
     payload
+}
+
+fn uses_max_completion_tokens(model: &str, config: OpenAiCompatConfig) -> bool {
+    matches!(config.provider_name, "OpenAI")
+        && model.trim().to_ascii_lowercase().starts_with("gpt-5")
 }
 
 fn translate_message(message: &InputMessage) -> Vec<Value> {
@@ -1063,6 +1073,25 @@ mod tests {
         );
 
         assert_eq!(payload["stream_options"], json!({"include_usage": true}));
+    }
+
+    #[test]
+    fn openai_gpt5_requests_use_max_completion_tokens() {
+        let payload = build_chat_completion_request(
+            &MessageRequest {
+                model: "gpt-5".to_string(),
+                max_tokens: 64,
+                messages: vec![InputMessage::user_text("hello")],
+                system: None,
+                tools: None,
+                tool_choice: None,
+                stream: false,
+            },
+            OpenAiCompatConfig::openai(),
+        );
+
+        assert_eq!(payload["max_completion_tokens"], json!(64));
+        assert!(payload.get("max_tokens").is_none());
     }
 
     #[test]
