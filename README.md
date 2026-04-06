@@ -1,3 +1,7 @@
+# Note:
+
+Thanks to the team who did the original work on this. This repo modifies ultraworkers/claw-code to make it not provider locked to Anthropic.
+
 # Claw Code
 
 <p align="center">
