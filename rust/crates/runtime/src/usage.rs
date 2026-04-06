@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_unknown_model_pricing_as_fallback() {
+    fn marks_unknown_model_pricing_as_unavailable() {
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 100,
@@ -297,7 +297,9 @@ mod tests {
             cache_read_input_tokens: 0,
         };
         let lines = usage.summary_lines_for_model("usage", Some("custom-model"));
-        assert!(lines[0].contains("pricing=estimated-default"));
+        assert!(lines[0].contains("estimated_cost=n/a"));
+        assert!(lines[0].contains("pricing=unavailable"));
+        assert!(lines[1].contains("cost breakdown: unavailable"));
     }
 
     #[test]
